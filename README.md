@@ -35,7 +35,7 @@ The bot implements the Turtle Trading System with the following rules:
 1. Clone this repository:
 
    ```
-   git clone https://github.com/yourusername/turtle-trading-bot.git
+   git clone https://github.com/Akcanbasri/turtle-trading-bot.git
    cd turtle-trading-bot
    ```
 
