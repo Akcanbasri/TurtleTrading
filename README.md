@@ -1,114 +1,89 @@
 # Turtle Trading Bot
 
-A Python trading bot that implements the Turtle Trading System strategy on the Binance exchange.
+A class-based implementation of the Turtle Trading strategy for algorithmic trading on the Binance exchange.
+
+## Overview
+
+This project implements the Turtle Trading system, a trend-following strategy developed by Richard Dennis and William Eckhardt. The bot trades automatically based on Donchian Channel breakouts and implements proper risk management with ATR-based stop losses.
 
 ## Features
 
-- Connects to Binance API (supports both testnet and production)
-- Implements Donchian Channel-based entry and exit signals
-- Uses ATR for position sizing and stop-loss calculation
-- Risk management with configurable risk per trade
-- Position state tracking and persistence between sessions
-- Smart candle-based timing system for efficient trading
-- Robust error handling and logging
+- **Class-based Architecture**: Modular, maintainable, and testable design
+- **Donchian Channel Breakout**: For trend identification and trade entries
+- **Risk Management**: ATR-based position sizing and stop losses
+- **Dual Direction Trading**: Support for both long and short positions
+- **State Persistence**: Save and load bot state between restarts
+- **Comprehensive Logging**: Detailed logs for monitoring and analysis
 
-## Strategy Implementation
+## Project Structure
 
-The bot implements the Turtle Trading System with the following rules:
+```
+turtle_trading_bot/
+├── turtle_trading_bot.py    # Main entry point
+├── .env                     # Configuration (API keys, trading parameters)
+├── .env.example             # Example configuration template
+├── requirements.txt         # Dependencies
+├── logs/                    # Trading logs directory
+├── config/                  # Bot state and configuration files
+└── bot/                     # Core modules
+    ├── __init__.py          # Package initialization
+    ├── core.py              # TurtleTradingBot class
+    ├── exchange.py          # Binance exchange operations
+    ├── indicators.py        # Technical indicators and signal detection
+    ├── models.py            # Data models and type definitions
+    ├── risk.py              # Risk management and position sizing
+    └── utils.py             # Utility functions
+```
 
-1. **Entry**: Buy when price breaks above the Donchian Channel upper band (lookback period configurable)
-2. **Exit**: Sell when price breaks below the Donchian Channel lower band (lookback period configurable)
-3. **Stop Loss**: Set at 2× ATR below entry price (multiplier configurable)
-4. **Position Sizing**: Based on account risk percentage divided by stop distance (ATR-based)
+## Setup and Configuration
 
-## Requirements
-
-- Python 3.7 or higher
-- Required packages:
-  - python-binance
-  - pandas
-  - pandas-ta
-  - python-dotenv
-
-## Installation
-
-1. Clone this repository:
-
-   ```
-   git clone https://github.com/Akcanbasri/turtle-trading-bot.git
-   cd turtle-trading-bot
-   ```
-
-2. Install the required packages:
-
+1. Clone the repository
+2. Install dependencies:
    ```
    pip install -r requirements.txt
    ```
-
-3. Create a `.env` file from the example:
-
+3. Copy `.env.example` to `.env` and update with your Binance API credentials:
    ```
    cp .env.example .env
    ```
-
-4. Edit the `.env` file with your Binance API credentials and desired parameters.
-
-## Configuration
-
-All configuration is done through environment variables in the `.env` file:
-
-- `BINANCE_API_KEY`: Your Binance API key
-- `BINANCE_API_SECRET`: Your Binance API secret
-- `USE_TESTNET`: Set to "True" to use Binance testnet or "False" to use real trading
-- `SYMBOL`: Trading pair (e.g., "BTCUSDT")
-- `TIMEFRAME`: Candlestick timeframe (e.g., "1h", "4h", "1d")
-- `DC_LENGTH_ENTER`: Donchian Channel period for entry signals (default: 20)
-- `DC_LENGTH_EXIT`: Donchian Channel period for exit signals (default: 10)
-- `ATR_LENGTH`: ATR indicator period (default: 14)
-- `ATR_SMOOTHING`: ATR smoothing period (default: 2)
-- `RISK_PER_TRADE`: Percentage of account balance to risk per trade (default: 0.02 = 2%)
-- `STOP_LOSS_ATR_MULTIPLE`: Stop loss distance in ATR multiples (default: 2)
-- `QUOTE_ASSET`: Quote asset in trading pair (e.g., "USDT")
-- `BASE_ASSET`: Base asset in trading pair (e.g., "BTC")
+4. Edit parameters in `.env` as needed (risk, timeframe, symbol, etc.)
 
 ## Usage
 
-1. Make sure your `.env` configuration is set correctly.
+Run the bot:
 
-2. Run the bot:
+```
+python turtle_trading_bot.py
+```
 
-   ```
-   python turtle_trading_bot.py
-   ```
+## Configuration Parameters
 
-3. The bot will:
+Edit these in the `.env` file:
 
-   - Connect to Binance API
-   - Load previous position state (if exists)
-   - Enter the main trading loop that runs until interrupted
-   - Wait for the next candle close based on the configured timeframe
-   - Make trading decisions at candle close
-   - Log all operations and trading decisions
+- **API_KEY/API_SECRET**: Your Binance API credentials
+- **USE_TESTNET**: Set to True for testing, False for live trading
+- **SYMBOL**: Trading pair (e.g., BTCUSDT)
+- **TIMEFRAME**: Candlestick interval (e.g., 1h, 4h, 1d)
+- **DC_LENGTH_ENTER**: Donchian Channel period for entries
+- **DC_LENGTH_EXIT**: Donchian Channel period for exits
+- **ATR_LENGTH**: ATR calculation period
+- **RISK_PER_TRADE**: Risk percentage per trade (0.02 = 2%)
+- **STOP_LOSS_ATR_MULTIPLE**: ATR multiplier for stop loss placement
 
-4. Press Ctrl+C to stop the bot.
+## Improvements from Original Codebase
 
-## Logs and State
-
-- Logs are stored in the `logs/` directory with daily rotating log files
-- Bot state is saved in `config/bot_state.json` and restored between sessions
-- Positions are tracked and persisted even if the bot is restarted
-
-## Security
-
-- Create a dedicated API key with trading permissions only
-- Store your API credentials securely in the `.env` file (not tracked in git)
-- Use testnet for testing before live trading
-- Implement additional security measures if deploying in production
-
-## Disclaimer
-
-This trading bot is for educational purposes only. Use at your own risk. Always test thoroughly on a testnet before using with real funds.
+- **Object-Oriented Design**: Proper encapsulation of state and behavior
+- **Type Hints**: Enhanced code quality and IDE support
+- **Modular Structure**: Separate modules for different concerns
+- **Improved Error Handling**: Consistent exception handling
+- **Better Documentation**: Comprehensive docstrings and code comments
+- **Short Position Support**: Added ability to trade in both directions
+- **Enhanced Testability**: Easier to write unit tests
 
 ## License
 
 [MIT License](LICENSE)
+
+## Disclaimer
+
+Trading cryptocurrencies carries significant risk. This bot is provided for educational purposes only. Use at your own risk.
