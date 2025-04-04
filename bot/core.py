@@ -6,15 +6,18 @@ import decimal
 import time
 import traceback
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Union
 
 import pandas as pd
+import logging
+import os
+import json
+from pathlib import Path
 
 from bot.exchange import BinanceExchange
 from bot.indicators import (
     calculate_indicators,
     calculate_stop_loss_take_profit,
-    check_entry_signal,
     check_exit_signal,
     check_stop_loss,
 )
@@ -29,42 +32,78 @@ from bot.utils import (
 )
 
 
+class DataManager:
+    """Manages data operations for the bot."""
+
+    def __init__(self, exchange):
+        """Initialize the data manager."""
+        self.exchange = exchange
+        self.data_cache = {}
+
+    def get_historical_data(self, symbol, timeframe, limit=100):
+        """Get historical candlestick data for a symbol and timeframe."""
+        cache_key = f"{symbol}_{timeframe}_{limit}"
+
+        # Check cache first
+        if cache_key in self.data_cache:
+            return self.data_cache[cache_key]
+
+        # Fetch from exchange
+        data = self.exchange.get_historical_data(symbol, timeframe, limit)
+
+        # Cache the result
+        self.data_cache[cache_key] = data
+
+        return data
+
+    def clear_cache(self):
+        """Clear the data cache."""
+        self.data_cache = {}
+
+
 class TurtleTradingBot:
     """
-    Turtle Trading Bot implementation
+    Turtle Trading Bot main class.
 
-    This class implements the Turtle Trading strategy using the Binance exchange.
-    It provides methods for initializing the bot, loading state, fetching data,
-    calculating indicators, executing trades, and managing positions.
+    This bot implements the Turtle Trading strategy, a trend-following approach
+    that uses Donchian Channel breakouts for entries and exits, with proper
+    risk management through position sizing based on ATR.
     """
 
-    def __init__(self, config: Optional[BotConfig] = None):
+    def __init__(self, use_testnet=True, config_file=".env"):
         """
-        Initialize the Turtle Trading Bot
+        Initialize the bot.
 
-        Parameters
-        ----------
-        config : Optional[BotConfig]
-            Bot configuration, if None load from environment variables
+        Args:
+            use_testnet: Whether to use the Binance testnet
+            config_file: Path to the configuration file
         """
-        # Set up decimal precision
-        decimal.getcontext().prec = 8
-
-        # Initialize logger
-        self.logger = setup_logging("turtle_trading_bot")
+        # Setup logging
+        self.logger = logging.getLogger("turtle_trading_bot")
 
         # Load configuration
-        self.config = config if config else BotConfig.from_env()
+        self.config_file = config_file
+        self.config = BotConfig(config_file)
 
-        # Initialize exchange client
+        # Override testnet setting if provided
+        if use_testnet is not None:
+            self.config.use_testnet = use_testnet
+
+        # Extract common settings for easier access
+        self.symbol = self.config.symbol
+        self.timeframe = self.config.timeframe
+        self.quote_asset = self.config.quote_asset
+        self.base_asset = self.config.base_asset
+
+        # Initialize exchange interface
         self.exchange = BinanceExchange(
             api_key=self.config.api_key,
             api_secret=self.config.api_secret,
             use_testnet=self.config.use_testnet,
         )
 
-        # Get symbol information
-        self.symbol_info = self.exchange.get_symbol_info(self.config.symbol)
+        # Initialize the data manager
+        self.data_manager = DataManager(self.exchange)
 
         # Initialize position state
         self.position = self._load_position_state()
@@ -298,292 +337,94 @@ class TurtleTradingBot:
                 f"Unexpected order scenario: side={side}, position_active={self.position.active}, position_side={self.position.side}"
             )
 
-    def check_and_execute_trading_logic(self, df_with_indicators: pd.DataFrame) -> None:
+    def check_and_execute_multi_timeframe_logic(self):
         """
-        Core trading logic that checks indicators and position state to make trading decisions
-
-        Parameters
-        ----------
-        df_with_indicators : pd.DataFrame
-            DataFrame with price data and calculated indicators
+        Implement the trading strategy logic.
+        Optimized version that uses multi-timeframe analysis, pyramiding, and advanced exit strategies.
         """
-        self.logger.info("Checking trading conditions...")
-
-        try:
-            # Get latest indicator values
-            latest_row = df_with_indicators.iloc[-1]
-
-            # Get current market price
-            current_price = self.exchange.get_current_price(self.config.symbol)
-            if not current_price:
-                self.logger.error("Failed to get current market price")
+        # Step 1: Check if we have an active position and manage exit if needed
+        if self.position.is_active:
+            self.manage_exit_strategy()
+            # If position was closed during exit management, proceed to entry analysis
+            if not self.position.is_active:
+                self.logger.info(
+                    "Position closed, now analyzing for new entry opportunities"
+                )
+            else:
+                # Position still active, check for pyramiding opportunities
                 return
 
-            self.logger.info(
-                f"Current market price: {format_price(current_price, self.symbol_info.price_precision)}"
-            )
-            self.logger.info(f"Latest indicators (timestamp {latest_row.name}):")
-            self.logger.info(f"  DC Upper Entry: {latest_row['dc_upper_entry']}")
-            self.logger.info(f"  DC Lower Entry: {latest_row['dc_lower_entry']}")
-            self.logger.info(f"  DC Upper Exit: {latest_row['dc_upper_exit']}")
-            self.logger.info(f"  DC Lower Exit: {latest_row['dc_lower_exit']}")
-            self.logger.info(f"  ATR: {latest_row['atr']}")
+        # Step 2: Analyze market for entry signals
+        if self.config["use_multi_timeframe"]:
+            # Use multi-timeframe analysis
+            analysis = self.analyze_multi_timeframe(self.symbol)
+            self.last_analysis = analysis  # Store for reference
 
-            # Check current position state
-            if self.position.active:
+            if not analysis["entry_signal"]:
+                self.logger.info("No entry signal detected")
+                return
+
+            # Entry signal detected, apply filters
+            signal_direction = analysis["signal_direction"]
+            current_price = analysis["current_price"]
+            atr = analysis["atr"]
+
+            # Apply ADX filter if enabled
+            if self.config["use_adx_filter"] and not analysis["adx_filter_passed"]:
                 self.logger.info(
-                    "Currently in active position. Checking exit conditions..."
+                    f"Entry signal detected but ADX filter failed. ADX: {analysis['adx_value']:.2f}"
                 )
+                return
 
-                if self.position.side == "BUY":  # We're in a LONG position
-                    # Check stop loss
-                    if check_stop_loss(
-                        float(current_price),
-                        float(self.position.stop_loss_price),
-                        self.position.side,
-                    ):
-                        self.logger.info(
-                            f"STOP LOSS TRIGGERED: Current price {format_price(current_price, self.symbol_info.price_precision)} <= Stop loss {format_price(self.position.stop_loss_price, self.symbol_info.price_precision)}"
-                        )
+            # Apply MA filter if enabled
+            if self.config["use_ma_filter"] and not analysis["ma_filter_passed"]:
+                self.logger.info("Entry signal detected but MA filter failed")
+                return
 
-                        # Execute sell order
-                        success, order_result = self.exchange.execute_order(
-                            symbol=self.config.symbol,
-                            side="SELL",
-                            quantity=self.position.quantity,
-                            symbol_info=self.symbol_info,
-                        )
-
-                        if success:
-                            self.logger.info(
-                                "Successfully closed LONG position with STOP LOSS"
-                            )
-                            self.update_position_state(order_result, "SELL")
-                        else:
-                            self.logger.error(
-                                f"Failed to execute stop loss order: {order_result}"
-                            )
-
-                    # Check Donchian channel exit (price breaks below lower band)
-                    elif check_exit_signal(latest_row, self.position.side):
-                        self.logger.info(
-                            f"EXIT SIGNAL: Close price {latest_row['close']} broke below Donchian lower band {latest_row['dc_lower_exit']}"
-                        )
-
-                        # Execute sell order
-                        success, order_result = self.exchange.execute_order(
-                            symbol=self.config.symbol,
-                            side="SELL",
-                            quantity=self.position.quantity,
-                            symbol_info=self.symbol_info,
-                        )
-
-                        if success:
-                            self.logger.info(
-                                "Successfully closed LONG position with Donchian exit signal"
-                            )
-                            self.update_position_state(order_result, "SELL")
-                        else:
-                            self.logger.error(
-                                f"Failed to execute Donchian exit order: {order_result}"
-                            )
-
-                    else:
-                        self.logger.info(
-                            "No exit conditions met, maintaining LONG position"
-                        )
-
-                elif self.position.side == "SELL":  # We're in a SHORT position
-                    # Check stop loss
-                    if check_stop_loss(
-                        float(current_price),
-                        float(self.position.stop_loss_price),
-                        self.position.side,
-                    ):
-                        self.logger.info(
-                            f"STOP LOSS TRIGGERED: Current price {format_price(current_price, self.symbol_info.price_precision)} >= Stop loss {format_price(self.position.stop_loss_price, self.symbol_info.price_precision)}"
-                        )
-
-                        # Execute buy order to close position
-                        success, order_result = self.exchange.execute_order(
-                            symbol=self.config.symbol,
-                            side="BUY",
-                            quantity=self.position.quantity,
-                            symbol_info=self.symbol_info,
-                        )
-
-                        if success:
-                            self.logger.info(
-                                "Successfully closed SHORT position with STOP LOSS"
-                            )
-                            self.update_position_state(order_result, "BUY")
-                        else:
-                            self.logger.error(
-                                f"Failed to execute stop loss order: {order_result}"
-                            )
-
-                    # Check Donchian channel exit (price breaks above upper band)
-                    elif check_exit_signal(latest_row, self.position.side):
-                        self.logger.info(
-                            f"EXIT SIGNAL: Close price {latest_row['close']} broke above Donchian upper band {latest_row['dc_upper_exit']}"
-                        )
-
-                        # Execute buy order to close position
-                        success, order_result = self.exchange.execute_order(
-                            symbol=self.config.symbol,
-                            side="BUY",
-                            quantity=self.position.quantity,
-                            symbol_info=self.symbol_info,
-                        )
-
-                        if success:
-                            self.logger.info(
-                                "Successfully closed SHORT position with Donchian exit signal"
-                            )
-                            self.update_position_state(order_result, "BUY")
-                        else:
-                            self.logger.error(
-                                f"Failed to execute Donchian exit order: {order_result}"
-                            )
-
-                    else:
-                        self.logger.info(
-                            "No exit conditions met, maintaining SHORT position"
-                        )
-
+            # All conditions met, execute entry or pyramid
+            if not self.position.is_active:
+                # New position
+                self.logger.info(f"Entry signal confirmed for {signal_direction}")
+                self._execute_entry(signal_direction, current_price, atr)
             else:
-                self.logger.info("No active position. Checking entry conditions...")
+                # Check for pyramiding opportunity
+                if signal_direction == self.position.side:
+                    self.execute_pyramid_entry(signal_direction, current_price, atr)
+        else:
+            # Use simple Donchian Channel breakout for entries
+            last_df = self.data_manager.get_historical_data(
+                self.symbol, self.timeframe, limit=100
+            )
 
-                # Check long entry signal - Breakout above Donchian upper band
-                if check_entry_signal(latest_row, "BUY"):
-                    self.logger.info(
-                        f"LONG ENTRY SIGNAL: Close price {latest_row['close']} broke above Donchian upper band {latest_row['dc_upper_entry']}"
-                    )
+            # Calculate indicators
+            from bot.indicators import calculate_indicators, check_entry_signal
 
-                    # Calculate position size
-                    quote_balance = self.exchange.get_account_balance(
-                        self.config.quote_asset
-                    )
-                    if not quote_balance:
-                        self.logger.error(
-                            f"Failed to get {self.config.quote_asset} balance"
-                        )
-                        return
+            calculate_indicators(last_df, self.config)
 
-                    self.logger.info(
-                        f"Available {self.config.quote_asset} balance: {quote_balance}"
-                    )
+            # Check entry signals
+            entry_long = check_entry_signal(last_df, "long")
+            entry_short = check_entry_signal(last_df, "short")
 
-                    # Calculate quantity based on risk management
-                    position_size, message = calculate_position_size(
-                        available_balance=quote_balance,
-                        risk_percent=self.config.risk_per_trade,
-                        atr_value=latest_row["atr"],
-                        current_price=current_price,
-                        symbol_info={
-                            "min_qty": self.symbol_info.min_qty,
-                            "step_size": self.symbol_info.step_size,
-                            "min_notional": self.symbol_info.min_notional,
-                            "price_precision": self.symbol_info.price_precision,
-                            "quantity_precision": self.symbol_info.quantity_precision,
-                        },
-                    )
+            signal_direction = None
+            if entry_long:
+                signal_direction = "long"
+            elif entry_short:
+                signal_direction = "short"
 
-                    if position_size > Decimal("0"):
-                        self.logger.info(
-                            f"Calculated position size: {position_size} {self.config.base_asset}"
-                        )
+            if signal_direction:
+                current_price = last_df["close"].iloc[-1]
+                atr = last_df["atr"].iloc[-1]
 
-                        # Execute buy order
-                        success, order_result = self.exchange.execute_order(
-                            symbol=self.config.symbol,
-                            side="BUY",
-                            quantity=position_size,
-                            symbol_info=self.symbol_info,
-                        )
-
-                        if success:
-                            self.logger.info("Successfully opened LONG position")
-                            self.update_position_state(
-                                order_result, "BUY", latest_row["atr"]
-                            )
-                        else:
-                            self.logger.error(
-                                f"Failed to execute entry order: {order_result}"
-                            )
-                    else:
-                        self.logger.warning(
-                            f"Entry signal detected but position size calculation failed: {message}"
-                        )
-
-                # Check short entry signal - Breakout below Donchian lower band
-                elif check_entry_signal(latest_row, "SELL"):
-                    self.logger.info(
-                        f"SHORT ENTRY SIGNAL: Close price {latest_row['close']} broke below Donchian lower band {latest_row['dc_lower_entry']}"
-                    )
-
-                    # Calculate position size
-                    quote_balance = self.exchange.get_account_balance(
-                        self.config.quote_asset
-                    )
-                    if not quote_balance:
-                        self.logger.error(
-                            f"Failed to get {self.config.quote_asset} balance"
-                        )
-                        return
-
-                    self.logger.info(
-                        f"Available {self.config.quote_asset} balance: {quote_balance}"
-                    )
-
-                    # Calculate quantity based on risk management
-                    position_size, message = calculate_position_size(
-                        available_balance=quote_balance,
-                        risk_percent=self.config.risk_per_trade,
-                        atr_value=latest_row["atr"],
-                        current_price=current_price,
-                        symbol_info={
-                            "min_qty": self.symbol_info.min_qty,
-                            "step_size": self.symbol_info.step_size,
-                            "min_notional": self.symbol_info.min_notional,
-                            "price_precision": self.symbol_info.price_precision,
-                            "quantity_precision": self.symbol_info.quantity_precision,
-                        },
-                    )
-
-                    if position_size > Decimal("0"):
-                        self.logger.info(
-                            f"Calculated position size: {position_size} {self.config.base_asset}"
-                        )
-
-                        # Execute sell order to open short position
-                        success, order_result = self.exchange.execute_order(
-                            symbol=self.config.symbol,
-                            side="SELL",
-                            quantity=position_size,
-                            symbol_info=self.symbol_info,
-                        )
-
-                        if success:
-                            self.logger.info("Successfully opened SHORT position")
-                            self.update_position_state(
-                                order_result, "SELL", latest_row["atr"]
-                            )
-                        else:
-                            self.logger.error(
-                                f"Failed to execute short entry order: {order_result}"
-                            )
-                    else:
-                        self.logger.warning(
-                            f"Short entry signal detected but position size calculation failed: {message}"
-                        )
-                else:
-                    self.logger.info("No entry conditions met")
-
-        except Exception as e:
-            self.logger.error(f"Error in trading logic: {e}")
-            self.logger.error(f"Exception details: {str(e)}")
-            self.logger.error(traceback.format_exc())
+                if not self.position.is_active:
+                    # New position
+                    self.logger.info(f"Entry signal confirmed for {signal_direction}")
+                    self._execute_entry(signal_direction, current_price, atr)
+                elif (
+                    signal_direction == self.position.side
+                    and self.config["use_pyramiding"]
+                ):
+                    # Pyramiding opportunity
+                    self.execute_pyramid_entry(signal_direction, current_price, atr)
 
     def run(self) -> None:
         """
@@ -692,7 +533,7 @@ class TurtleTradingBot:
                         )
 
                     # Check trading conditions and execute orders if needed
-                    self.check_and_execute_trading_logic(df_with_indicators)
+                    self.check_and_execute_multi_timeframe_logic()
 
                     # Log position state if active
                     if self.position.active:
@@ -732,3 +573,610 @@ class TurtleTradingBot:
             self.logger.info("==============================================")
             self.logger.info("          TURTLE TRADING BOT STOPPED         ")
             self.logger.info("==============================================")
+
+    def run_trading_cycle(self):
+        """Run a complete trading cycle."""
+        self.logger.info(f"Running trading cycle for {self.symbol}")
+        try:
+            # Get latest market data
+            self.update_market_data()
+            # Execute trading logic
+            self.check_and_execute_multi_timeframe_logic()
+            # Save the updated state
+            self.save_state()
+        except Exception as e:
+            self.logger.error(f"Error during trading cycle: {e}")
+
+    def analyze_only(self):
+        """Run analysis without executing trades (for testing)"""
+        self.logger.info(f"Analyzing market for {self.symbol} (test mode)")
+        try:
+            # Get latest market data
+            self.update_market_data()
+
+            # Get analysis results
+            if self.config["use_multi_timeframe"]:
+                analysis = self.analyze_multi_timeframe(self.symbol)
+                self.logger.info("Multi-timeframe analysis results:")
+                self.logger.info(f"Trend strength (ADX): {analysis['adx_value']:.2f}")
+                self.logger.info(f"Trend direction: {analysis['trend_direction']}")
+                self.logger.info(f"Entry signal: {analysis['entry_signal']}")
+                self.logger.info(f"Signal direction: {analysis['signal_direction']}")
+
+                # Check filters
+                if self.config["use_adx_filter"]:
+                    adx_passed = analysis["adx_value"] > self.config["adx_threshold"]
+                    self.logger.info(f"ADX filter passed: {adx_passed}")
+
+                if self.config["use_ma_filter"]:
+                    ma_passed = analysis["ma_filter_passed"]
+                    self.logger.info(f"MA filter passed: {ma_passed}")
+            else:
+                # Get entry signals from standard Donchian Channel breakout
+                last_df = self.data_manager.get_historical_data(
+                    self.symbol, self.timeframe, limit=100
+                )
+
+                # Calculate indicators
+                from bot.indicators import calculate_indicators, check_entry_signal
+
+                calculate_indicators(last_df, self.config)
+
+                entry_long = check_entry_signal(last_df, "long")
+                entry_short = check_entry_signal(last_df, "short")
+
+                self.logger.info(f"Current price: {last_df['close'].iloc[-1]:.2f}")
+                self.logger.info(
+                    f"Donchian Upper Band: {last_df['dc_upper'].iloc[-1]:.2f}"
+                )
+                self.logger.info(
+                    f"Donchian Lower Band: {last_df['dc_lower'].iloc[-1]:.2f}"
+                )
+                self.logger.info(f"ATR: {last_df['atr'].iloc[-1]:.2f}")
+                self.logger.info(f"Entry signal long: {entry_long}")
+                self.logger.info(f"Entry signal short: {entry_short}")
+
+            # Check active position
+            if self.position.is_active:
+                self.logger.info(
+                    f"Active position: {self.position.side} at {self.position.entry_price:.2f}"
+                )
+                self.logger.info(f"Current PnL: {self.calculate_unrealized_pnl():.2f}%")
+                self.logger.info(f"Stop loss at: {self.position.stop_loss_price:.2f}")
+
+                # Check exit conditions
+                last_price = self.get_current_price()
+                stop_triggered = self.check_stop_loss(last_price)
+                exit_signal = self.check_exit_signal()
+
+                self.logger.info(f"Stop loss triggered: {stop_triggered}")
+                self.logger.info(f"Exit signal: {exit_signal}")
+
+                if (
+                    self.config["use_trailing_stop"]
+                    and self.position.trailing_stop_price
+                ):
+                    self.logger.info(
+                        f"Trailing stop at: {self.position.trailing_stop_price:.2f}"
+                    )
+
+                if self.config["use_partial_exits"]:
+                    from bot.indicators import check_partial_exit
+
+                    partial_exit = check_partial_exit(
+                        last_price,
+                        self.position.entry_price,
+                        self.position.side,
+                        self.position.atr_at_entry,
+                        self.config["first_target_atr"],
+                    )
+                    self.logger.info(f"Partial exit signal: {partial_exit}")
+
+        except Exception as e:
+            self.logger.error(f"Error during market analysis: {e}")
+
+    def run_backtest(self, days=30):
+        """Run backtest for specified number of days"""
+        self.logger.info(f"Starting backtest for {self.symbol} over {days} days")
+
+        # Placeholder for backtest implementation
+        # This would need to be implemented with historical data processing
+        # and simulated trade execution
+        self.logger.info("Backtesting not yet implemented")
+
+    def analyze_multi_timeframe(self, symbol):
+        """
+        Perform multi-timeframe analysis to evaluate trends and entry conditions.
+
+        Args:
+            symbol: The trading symbol to analyze
+
+        Returns:
+            dict: Results of analysis including trend alignment and entry signals
+        """
+        self.logger.info(f"Performing multi-timeframe analysis for {symbol}")
+
+        # Get historical data for trend timeframe (higher timeframe)
+        trend_df = self.data_manager.get_historical_data(
+            symbol, self.config["trend_timeframe"], limit=100
+        )
+
+        # Get historical data for entry timeframe (lower timeframe)
+        entry_df = self.data_manager.get_historical_data(
+            symbol, self.config["entry_timeframe"], limit=100
+        )
+
+        # Calculate indicators for both timeframes
+        from bot.indicators import calculate_indicators, check_entry_signal
+        from bot.indicators import check_adx_filter, check_ma_filter
+
+        calculate_indicators(trend_df, self.config)
+        calculate_indicators(entry_df, self.config)
+
+        # Determine trend direction from higher timeframe
+        if trend_df["close"].iloc[-1] > trend_df["ma"].iloc[-1]:
+            trend_direction = "long"
+        elif trend_df["close"].iloc[-1] < trend_df["ma"].iloc[-1]:
+            trend_direction = "short"
+        else:
+            trend_direction = "neutral"
+
+        # Check entry signals on entry timeframe
+        entry_long = check_entry_signal(entry_df, "long")
+        entry_short = check_entry_signal(entry_df, "short")
+
+        # Check if entry aligns with trend
+        entry_signal = False
+        signal_direction = "none"
+
+        if entry_long and (
+            trend_direction == "long" or not self.config["trend_alignment_required"]
+        ):
+            entry_signal = True
+            signal_direction = "long"
+        elif entry_short and (
+            trend_direction == "short" or not self.config["trend_alignment_required"]
+        ):
+            entry_signal = True
+            signal_direction = "short"
+
+        # Check ADX for trend strength
+        adx_value = trend_df["adx"].iloc[-1]
+        adx_passed = check_adx_filter(trend_df, self.config["adx_threshold"])
+
+        # Check MA filter for price position relative to MA
+        ma_passed = False
+        if signal_direction != "none":
+            ma_passed = check_ma_filter(entry_df, signal_direction)
+
+        return {
+            "trend_direction": trend_direction,
+            "entry_signal": entry_signal,
+            "signal_direction": signal_direction,
+            "adx_value": adx_value,
+            "adx_filter_passed": adx_passed,
+            "ma_filter_passed": ma_passed,
+            "current_price": entry_df["close"].iloc[-1],
+            "atr": entry_df["atr"].iloc[-1],
+        }
+
+    def execute_pyramid_entry(self, direction, price, atr):
+        """
+        Implement pyramiding approach for gradual entry into positions.
+
+        Args:
+            direction: 'long' or 'short'
+            price: Current market price
+            atr: Current ATR value
+
+        Returns:
+            bool: Whether a pyramid entry was executed
+        """
+        if not self.config["use_pyramiding"]:
+            return False
+
+        # Check if we have an active position
+        if not self.position.is_active:
+            # No active position, can't pyramid
+            return False
+
+        # Check if direction matches current position
+        if direction != self.position.side:
+            return False
+
+        # Check if we've reached maximum pyramid entries
+        if self.position.entry_count >= self.config["pyramid_max_entries"]:
+            self.logger.info(
+                f"Maximum pyramid entries ({self.config['pyramid_max_entries']}) reached"
+            )
+            return False
+
+        # Calculate time since last entry
+        time_since_last_entry = time.time() - self.position.last_entry_time
+        min_time_between_entries = 3600  # 1 hour minimum between entries
+
+        if time_since_last_entry < min_time_between_entries:
+            self.logger.info(
+                f"Too soon for another pyramid entry (minimum time: {min_time_between_entries/3600:.1f}h)"
+            )
+            return False
+
+        # Check if price has moved in our favor since last entry
+        price_moved_enough = False
+
+        if direction == "long" and price > self.position.entry_price * 1.005:
+            price_moved_enough = True
+        elif direction == "short" and price < self.position.entry_price * 0.995:
+            price_moved_enough = True
+
+        if not price_moved_enough:
+            self.logger.info("Price hasn't moved enough for a pyramid entry")
+            return False
+
+        # All conditions met, execute pyramid entry
+        self.logger.info(
+            f"Executing pyramid entry #{self.position.entry_count + 1} for {direction}"
+        )
+
+        # Use smaller position size for pyramid entries
+        if self.position.entry_count == 0:
+            # First pyramid entry after initial entry
+            size_factor = self.config["pyramid_size_first"]
+        else:
+            # Subsequent pyramid entries
+            size_factor = self.config["pyramid_size_additional"]
+
+        # Execute the entry
+        success = self._execute_entry(direction, price, atr, size_factor=size_factor)
+
+        if success:
+            self.position.entry_count += 1
+            self.position.last_entry_time = time.time()
+            self.logger.info(
+                f"Pyramid entry successful. Total entries: {self.position.entry_count}"
+            )
+            return True
+        else:
+            self.logger.warning("Pyramid entry failed")
+            return False
+
+    def _execute_entry(self, direction, price, atr, size_factor=1.0):
+        """
+        Handle the actual position opening process.
+
+        Args:
+            direction: 'long' or 'short'
+            price: Entry price
+            atr: Current ATR value
+            size_factor: Factor to adjust position size (used for pyramiding)
+
+        Returns:
+            bool: Whether the entry was successful
+        """
+        try:
+            # Calculate position size
+            account_balance = self.exchange.get_balance(self.quote_asset)
+
+            # Determine leverage based on trend alignment
+            if self.config["use_multi_timeframe"] and hasattr(self, "last_analysis"):
+                trend_direction = self.last_analysis.get("trend_direction", "neutral")
+
+                if direction == trend_direction:
+                    # Trade is in trend direction, use higher leverage
+                    leverage = min(
+                        self.config["max_leverage_trend"], self.config["leverage"]
+                    )
+                else:
+                    # Counter-trend trade, use lower leverage
+                    leverage = min(
+                        self.config["max_leverage_counter"], self.config["leverage"]
+                    )
+            else:
+                leverage = self.config["leverage"]
+
+            # Calculate position size
+            risk_amount = account_balance * self.config["risk_per_trade"] * size_factor
+            stop_price = self.calculate_stop_loss_price(direction, price, atr)
+            risk_per_unit = abs(price - stop_price)
+
+            # Adjust for leverage
+            position_size = (risk_amount / risk_per_unit) * leverage
+
+            # Convert to asset quantity
+            quantity = position_size / price
+
+            # Check if this is the first entry or a pyramid entry
+            if not self.position.is_active:
+                # First entry - create new position
+                self.position.side = direction
+                self.position.entry_price = price
+                self.position.quantity = quantity
+                self.position.entry_time = time.time()
+                self.position.stop_loss_price = stop_price
+                self.position.atr_at_entry = atr
+                self.position.is_active = True
+                self.position.entry_count = 1
+                self.position.last_entry_time = time.time()
+
+                self.logger.info(
+                    f"Opened new {direction} position at {price:.2f}, quantity: {quantity:.6f}"
+                )
+
+            else:
+                # Pyramid entry - update existing position
+                new_total_quantity = self.position.quantity + quantity
+                new_avg_price = (
+                    (self.position.entry_price * self.position.quantity)
+                    + (price * quantity)
+                ) / new_total_quantity
+
+                self.position.entry_price = new_avg_price
+                self.position.quantity = new_total_quantity
+
+                # Keep the original stop loss for the combined position
+                # We could adjust this if needed based on strategy requirements
+
+                self.logger.info(
+                    f"Added to {direction} position at {price:.2f}, "
+                    f"new avg price: {new_avg_price:.2f}, "
+                    f"new quantity: {new_total_quantity:.6f}"
+                )
+
+            # TODO: Set up trailing stop if enabled
+            if self.config["use_trailing_stop"]:
+                # Initialize trailing stop to None, will be set once in profit
+                self.position.trailing_stop_price = None
+
+            # Save position state
+            self.save_state()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error executing entry: {e}")
+            return False
+
+    def manage_exit_strategy(self):
+        """
+        Manage position exits through various strategies.
+        """
+        if not self.position.is_active:
+            return
+
+        # Get current price
+        current_price = self.get_current_price()
+
+        # 1. Check stop loss
+        if self.check_stop_loss(current_price):
+            self._execute_full_exit(current_price, "Stop loss triggered")
+            return
+
+        # 2. Check for trailing stop if enabled
+        if self.config["use_trailing_stop"]:
+            # Check if we have a trailing stop price set
+            if self.position.trailing_stop_price:
+                if (
+                    self.position.side == "long"
+                    and current_price <= self.position.trailing_stop_price
+                ) or (
+                    self.position.side == "short"
+                    and current_price >= self.position.trailing_stop_price
+                ):
+                    self._execute_full_exit(current_price, "Trailing stop triggered")
+                    return
+
+            # Check if we should set or update trailing stop
+            self.update_trailing_stop(current_price)
+
+        # 3. Check for partial exits if enabled
+        if self.config["use_partial_exits"] and not self.position.partial_exits_done:
+            from bot.indicators import check_partial_exit
+
+            # First target (usually 50% of position)
+            if not self.position.first_target_reached:
+                first_target_hit = check_partial_exit(
+                    current_price,
+                    self.position.entry_price,
+                    self.position.side,
+                    self.position.atr_at_entry,
+                    self.config["first_target_atr"],
+                )
+
+                if first_target_hit:
+                    self._execute_partial_exit(
+                        current_price, 0.5, "First target reached"
+                    )
+                    self.position.first_target_reached = True
+                    return
+
+            # Second target (usually 30% of original position)
+            elif not self.position.second_target_reached:
+                second_target_hit = check_partial_exit(
+                    current_price,
+                    self.position.entry_price,
+                    self.position.side,
+                    self.position.atr_at_entry,
+                    self.config["second_target_atr"],
+                )
+
+                if second_target_hit:
+                    self._execute_partial_exit(
+                        current_price, 0.6, "Second target reached"
+                    )  # 60% of remaining
+                    self.position.second_target_reached = True
+                    return
+
+            # After second target, we leave the remaining 20% to be managed by trailing stop
+
+        # 4. Check for exit signals from Donchian Channel
+        if self.check_exit_signal():
+            self._execute_full_exit(current_price, "Exit signal triggered")
+            return
+
+    def _execute_partial_exit(self, price, exit_percentage, reason=""):
+        """
+        Execute a partial exit from a position.
+
+        Args:
+            price: Current market price
+            exit_percentage: Percentage of position to exit (0.0 to 1.0)
+            reason: Reason for the exit
+        """
+        if not self.position.is_active:
+            return False
+
+        # Calculate exit quantity
+        exit_quantity = self.position.quantity * exit_percentage
+
+        try:
+            # TODO: Execute the actual order via exchange
+            # For now we'll simulate it
+
+            # Calculate profit/loss
+            if self.position.side == "long":
+                pnl_percentage = (
+                    (price - self.position.entry_price) / self.position.entry_price
+                ) * 100
+            else:  # short
+                pnl_percentage = (
+                    (self.position.entry_price - price) / self.position.entry_price
+                ) * 100
+
+            self.logger.info(
+                f"Executed partial exit ({exit_percentage * 100:.0f}%) at {price:.2f}, "
+                f"PnL: {pnl_percentage:.2f}%, Reason: {reason}"
+            )
+
+            # Update position
+            remaining_quantity = self.position.quantity - exit_quantity
+            self.position.quantity = remaining_quantity
+
+            self.logger.info(
+                f"Remaining position: {remaining_quantity:.6f} {self.base_asset}"
+            )
+
+            # If quantity very small, consider position closed
+            if remaining_quantity * price < 5:  # Less than $5 worth
+                self._execute_full_exit(price, "Remaining position too small")
+
+            # Save updated state
+            self.save_state()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error executing partial exit: {e}")
+            return False
+
+    def _execute_full_exit(self, price, reason=""):
+        """
+        Execute a full exit from a position.
+
+        Args:
+            price: Current market price
+            reason: Reason for the exit
+        """
+        if not self.position.is_active:
+            return False
+
+        try:
+            # TODO: Execute the actual order via exchange
+            # For now we'll simulate it
+
+            # Calculate profit/loss
+            if self.position.side == "long":
+                pnl_percentage = (
+                    (price - self.position.entry_price) / self.position.entry_price
+                ) * 100
+            else:  # short
+                pnl_percentage = (
+                    (self.position.entry_price - price) / self.position.entry_price
+                ) * 100
+
+            # Calculate trade duration
+            duration_seconds = time.time() - self.position.entry_time
+            duration_hours = duration_seconds / 3600
+
+            self.logger.info(
+                f"Closed {self.position.side} position at {price:.2f}, "
+                f"PnL: {pnl_percentage:.2f}%, "
+                f"Duration: {duration_hours:.1f}h, "
+                f"Reason: {reason}"
+            )
+
+            # Reset position state
+            self.position.is_active = False
+            self.position.quantity = 0
+            self.position.side = None
+            self.position.entry_price = 0
+            self.position.stop_loss_price = 0
+            self.position.trailing_stop_price = None
+            self.position.atr_at_entry = 0
+            self.position.entry_count = 0
+            self.position.last_entry_time = 0
+            self.position.first_target_reached = False
+            self.position.second_target_reached = False
+
+            # Save updated state
+            self.save_state()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error executing full exit: {e}")
+            return False
+
+    def update_trailing_stop(self, current_price):
+        """
+        Update the trailing stop price once a position is in profit.
+
+        Args:
+            current_price: Current market price
+        """
+        if not self.position.is_active or not self.config["use_trailing_stop"]:
+            return
+
+        # Calculate profit threshold
+        profit_threshold = self.config["profit_for_trailing"]
+
+        # Check if position is in sufficient profit to activate trailing stop
+        in_profit = False
+
+        if self.position.side == "long":
+            profit_pct = (
+                current_price - self.position.entry_price
+            ) / self.position.entry_price
+            in_profit = profit_pct > profit_threshold
+        else:  # short
+            profit_pct = (
+                self.position.entry_price - current_price
+            ) / self.position.entry_price
+            in_profit = profit_pct > profit_threshold
+
+        if not in_profit:
+            return
+
+        # Calculate new trailing stop price
+        from bot.indicators import update_trailing_stop
+
+        new_stop = update_trailing_stop(
+            current_price,
+            self.position.side,
+            self.position.atr_at_entry,
+            self.position.trailing_stop_price,
+        )
+
+        # Update trailing stop if it's more favorable
+        if self.position.trailing_stop_price is None:
+            self.position.trailing_stop_price = new_stop
+            self.logger.info(f"Activated trailing stop at {new_stop:.2f}")
+        else:
+            if (
+                self.position.side == "long"
+                and new_stop > self.position.trailing_stop_price
+            ) or (
+                self.position.side == "short"
+                and new_stop < self.position.trailing_stop_price
+            ):
+                old_stop = self.position.trailing_stop_price
+                self.position.trailing_stop_price = new_stop
+                self.logger.info(
+                    f"Updated trailing stop from {old_stop:.2f} to {new_stop:.2f}"
+                )

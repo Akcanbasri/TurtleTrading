@@ -1,19 +1,91 @@
-# Turtle Trading Bot
+# Gelişmiş Turtle Trading Bot
 
-A class-based implementation of the Turtle Trading strategy for algorithmic trading on the Binance exchange.
+Bu proje, Turtle Trading stratejisini kullanan ve çeşitli gelişmiş özelliklerle zenginleştirilmiş bir algoritmik ticaret botudur.
 
-## Overview
+## Özellikler
 
-This project implements the Turtle Trading system, a trend-following strategy developed by Richard Dennis and William Eckhardt. The bot trades automatically based on Donchian Channel breakouts and implements proper risk management with ATR-based stop losses.
+- **Çoklu Zaman Dilimi Analizi**: Farklı zaman dilimlerinde trendleri tespit etme
+- **Piramit Pozisyon Açma**: Trendin güçlenmesi durumunda pozisyonu artırma
+- **Gelişmiş Çıkış Stratejisi**: Kısmi kar alma hedefleri ve trailing stop
+- **Trend Filtreleri**: ADX ve Hareketli Ortalama (MA) filtrelemeleri
+- **Akıllı Risk Yönetimi**: Pozisyon başına ve toplam risk limitlemesi
 
-## Features
+## Strateji Mantığı
 
-- **Class-based Architecture**: Modular, maintainable, and testable design
-- **Donchian Channel Breakout**: For trend identification and trade entries
-- **Risk Management**: ATR-based position sizing and stop losses
-- **Dual Direction Trading**: Support for both long and short positions
-- **State Persistence**: Save and load bot state between restarts
-- **Comprehensive Logging**: Detailed logs for monitoring and analysis
+Bu bot, şu temel bileşenlere dayalı bir ticaret stratejisi uygular:
+
+1. **Trend Analizi**:
+   - 1 günlük grafikte 200 günlük hareketli ortalama ile ana trendler belirlenir
+   - ADX göstergesi ile trend gücü ölçülür (25 üzeri değerler güçlü trend)
+
+2. **Giriş Sinyalleri**:
+   - Donchian Kanalları trend-takip eden giriş sinyalleri üretir
+   - Giriş sinyalleri ana trend yönü ile karşılaştırılarak onaylanır
+
+3. **Piramitleme**:
+   - İlk giriş: Planlanmış pozisyon boyutunun %40'ı
+   - Ek girişler: Kalan büyüklüğün %30'luk dilimleri
+
+4. **Çıkış Stratejisi**:
+   - İlk Hedef: 3 ATR mesafesinde pozisyonun %50'si çıkılır
+   - İkinci Hedef: 5 ATR mesafesinde pozisyonun %30'u çıkılır
+   - Son dilim için: Trailing stop kullanılır
+
+5. **Kaldıraç Yönetimi**:
+   - Trend yönünde işlemlerde: 2-3x kaldıraç
+   - Trend tersine işlemlerde: Maksimum 1.5x kaldıraç
+
+## Kurulum
+
+1. Depoyu klonlayın:
+```bash
+git clone [repo-url]
+cd TurtleTrading
+```
+
+2. Gerekli paketleri yükleyin:
+```bash
+pip install -r requirements.txt
+```
+
+3. `.env` dosyasını düzenleyin:
+```
+# API anahtarlarınızı buraya yazın
+BINANCE_API_KEY=your_api_key_here
+BINANCE_API_SECRET=your_api_secret_here
+USE_TESTNET=True  # Gerçek ticarete başlamadan önce test modunda çalıştırın
+```
+
+4. Strateji parametrelerini `.env` dosyasında isteğe göre ayarlayın:
+```
+# Risk parametrelerini kendi tercihlerinize göre ayarlayın
+RISK_PER_TRADE=0.02  # Sermayenizin %2'si
+STOP_LOSS_ATR_MULTIPLE=1.5  # ATR'nin 1.5 katı stop loss mesafesi
+```
+
+## Çalıştırma
+
+Botu başlatmak için:
+
+```bash
+python turtle_trading_bot.py
+```
+
+## Dikkat Edilmesi Gerekenler
+
+- Gerçek parayla kullanmadan önce testnet üzerinde test edin
+- Risk yönetimi parametrelerini kendi risk toleransınıza göre ayarlayın
+- Bot, sermayenizin tamamını kaybetme riskiyle çalışır, sorumluluk size aittir
+
+## Özelleştirme
+
+Strateji parametrelerini `.env` dosyasında değiştirerek botun davranışını özelleştirebilirsiniz:
+
+- `USE_MULTI_TIMEFRAME`: Çoklu zaman dilimi analizini açar/kapatır
+- `USE_PYRAMIDING`: Piramitleme stratejisini açar/kapatır
+- `USE_TRAILING_STOP`: Trailing stop kullanımını açar/kapatır
+- `USE_PARTIAL_EXITS`: Kısmi kar alma hedeflerini açar/kapatır
+- `USE_ADX_FILTER` ve `USE_MA_FILTER`: Trend filtrelerini açar/kapatır
 
 ## Project Structure
 

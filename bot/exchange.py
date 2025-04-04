@@ -520,3 +520,170 @@ class BinanceExchange:
         except Exception as e:
             self.logger.error(f"Unexpected error executing order: {e}")
             return False, {"error": str(e)}
+
+
+class ExchangeInterface:
+    """
+    Exchange interface that wraps the BinanceExchange class.
+
+    This class provides a simplified interface to exchange operations and handles
+    additional functionality like error handling and data conversion.
+    """
+
+    def __init__(self, api_key, api_secret, use_testnet=True):
+        """
+        Initialize the exchange interface.
+
+        Args:
+            api_key: Binance API key
+            api_secret: Binance API secret
+            use_testnet: Whether to use the Binance testnet
+        """
+        self.logger = logging.getLogger("turtle_trading_bot")
+        self.exchange = BinanceExchange(api_key, api_secret, use_testnet)
+        self.symbol_cache = {}
+
+    def get_historical_data(self, symbol, timeframe, limit=100):
+        """
+        Get historical candlestick data for a symbol and timeframe.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+            timeframe: Candlestick timeframe (e.g., '1h', '4h', '1d')
+            limit: Number of candlesticks to retrieve
+
+        Returns:
+            pandas.DataFrame: Historical data with OHLCV columns
+        """
+        try:
+            # Convert Binance klines to DataFrame
+            klines = self.exchange.client.get_klines(
+                symbol=symbol, interval=timeframe, limit=limit
+            )
+
+            # Create DataFrame
+            data = pd.DataFrame(
+                klines,
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "close_time",
+                    "quote_asset_volume",
+                    "number_of_trades",
+                    "taker_buy_base_asset_volume",
+                    "taker_buy_quote_asset_volume",
+                    "ignore",
+                ],
+            )
+
+            # Convert types
+            data["timestamp"] = pd.to_datetime(data["timestamp"], unit="ms")
+            for col in ["open", "high", "low", "close", "volume"]:
+                data[col] = data[col].astype(float)
+
+            # Set timestamp as index
+            data.set_index("timestamp", inplace=True)
+
+            return data
+
+        except Exception as e:
+            self.logger.error(f"Error getting historical data: {e}")
+            raise
+
+    def get_symbol_info(self, symbol):
+        """
+        Get information about a trading symbol.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+
+        Returns:
+            dict: Symbol information
+        """
+        # Check cache first
+        if symbol in self.symbol_cache:
+            return self.symbol_cache[symbol]
+
+        # Get info from exchange
+        symbol_info = self.exchange.get_symbol_info(symbol)
+
+        # Cache the result
+        self.symbol_cache[symbol] = symbol_info
+
+        return symbol_info
+
+    def get_current_price(self, symbol):
+        """
+        Get current market price for a symbol.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+
+        Returns:
+            float: Current market price
+        """
+        price = self.exchange.get_current_price(symbol)
+        if price is not None:
+            return float(price)
+        else:
+            raise ValueError(f"Could not get current price for {symbol}")
+
+    def get_balance(self, asset):
+        """
+        Get available balance for an asset.
+
+        Args:
+            asset: Asset name (e.g., 'USDT', 'BTC')
+
+        Returns:
+            float: Available balance
+        """
+        balance = self.exchange.get_account_balance(asset)
+        if balance is not None:
+            return float(balance)
+        else:
+            raise ValueError(f"Could not get balance for {asset}")
+
+    def get_account_info(self):
+        """
+        Get account information.
+
+        Returns:
+            dict: Account information
+        """
+        try:
+            return self.exchange.client.get_account()
+        except Exception as e:
+            self.logger.error(f"Error getting account info: {e}")
+            raise
+
+    def execute_order(
+        self, symbol, side, quantity, order_type="MARKET", simulate=False
+    ):
+        """
+        Execute an order on the exchange.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+            side: Order side ('BUY' or 'SELL')
+            quantity: Order quantity
+            order_type: Order type (default: 'MARKET')
+            simulate: Whether to simulate the order
+
+        Returns:
+            tuple: (success, order_details)
+        """
+        symbol_info = self.get_symbol_info(symbol)
+
+        return self.exchange.execute_order(
+            symbol=symbol,
+            side=side,
+            quantity=Decimal(str(quantity)),
+            symbol_info=symbol_info,
+            order_type=order_type,
+            simulate=simulate,
+        )

@@ -4,7 +4,7 @@ Risk management and position sizing for the Turtle Trading Bot
 
 import logging
 from decimal import Decimal
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict, Any
 
 from bot.utils import round_step_size
 
@@ -15,6 +15,13 @@ def calculate_position_size(
     atr_value: Union[float, Decimal],
     current_price: Decimal,
     symbol_info: dict,
+    max_risk_percentage: Decimal = Decimal("0.1"),
+    leverage: int = 1,
+    position_side: str = "BUY",
+    pyramid_level: int = 0,
+    pyramid_size_first: Decimal = Decimal("0.4"),
+    pyramid_size_additional: Decimal = Decimal("0.3"),
+    is_trend_aligned: bool = True,
 ) -> Tuple[Decimal, str]:
     """
     Calculate position size based on risk management rules and exchange limitations
@@ -30,12 +37,21 @@ def calculate_position_size(
     current_price : Decimal
         Current market price
     symbol_info : dict
-        Trading rules for the symbol with keys:
-        - min_qty: minimum allowed quantity
-        - step_size: quantity step size
-        - min_notional: minimum notional value
-        - price_precision: price precision
-        - quantity_precision: quantity precision
+        Trading rules for the symbol
+    max_risk_percentage : Decimal
+        Maximum risk percentage of all open positions
+    leverage : int
+        Leverage to use (1 = no leverage)
+    position_side : str
+        Position side ('BUY' or 'SELL')
+    pyramid_level : int
+        Current pyramid level (0 = first entry)
+    pyramid_size_first : Decimal
+        Portion of planned size for first entry (e.g., 0.4 = 40%)
+    pyramid_size_additional : Decimal
+        Portion of planned size for additional entries
+    is_trend_aligned : bool
+        Whether the trade is aligned with the main trend
 
     Returns
     -------
@@ -62,26 +78,53 @@ def calculate_position_size(
             f"Risk amount: {risk_amount} ({risk_percent*100}% of {available_balance})"
         )
 
-        # 2. Calculate stop loss distance in quote asset terms
+        # 2. Adjust leverage based on trend alignment
+        effective_leverage = Decimal(str(leverage))
+        if not is_trend_aligned:
+            effective_leverage = Decimal("1.0")  # No leverage for counter-trend trades
+            logger.info("Counter-trend trade detected, reducing leverage to 1x")
+
+        logger.info(f"Using effective leverage: {effective_leverage}x")
+
+        # 3. Calculate stop loss distance in quote asset terms
         stop_distance = atr_value_dec
         stop_distance_quote = stop_distance
-        logger.info(f"Stop distance: {stop_distance} (ATR {atr_value_dec})")
 
-        # 3. Calculate position size based on risk amount and stop distance
+        # 4. Adjust for leverage - risk stays the same but position size increases
+        risk_with_leverage = risk_amount * effective_leverage
+
+        logger.info(f"Stop distance: {stop_distance} (ATR {atr_value_dec})")
+        logger.info(f"Leveraged risk amount: {risk_with_leverage}")
+
+        # 5. Calculate base position size based on risk amount and stop distance
         if stop_distance_quote == Decimal("0"):
             return (
                 Decimal("0"),
                 "Stop distance is zero. Cannot calculate position size.",
             )
 
-        position_size = risk_amount / stop_distance_quote
-        logger.info(f"Initial position size calculation: {position_size}")
+        base_position_size = risk_with_leverage / stop_distance_quote
+        logger.info(f"Base position size calculation: {base_position_size}")
 
-        # 4. Adjust for step size restrictions
+        # 6. Apply position sizing based on pyramid level
+        if pyramid_level == 0:
+            # First entry - use the specified percentage
+            position_size = base_position_size * pyramid_size_first
+            logger.info(f"First pyramid entry: using {pyramid_size_first*100}% of size")
+        else:
+            # Subsequent entries - use the additional percentage
+            position_size = base_position_size * pyramid_size_additional
+            logger.info(
+                f"Pyramid level {pyramid_level+1}: using {pyramid_size_additional*100}% of size"
+            )
+
+        logger.info(f"Position size after pyramid adjustment: {position_size}")
+
+        # 7. Adjust for step size restrictions
         adjusted_position_size = Decimal(str(round_step_size(position_size, step_size)))
         logger.info(f"Position size adjusted for step size: {adjusted_position_size}")
 
-        # 5. Check against minimum quantity requirement
+        # 8. Check against minimum quantity requirement
         if adjusted_position_size < min_qty:
             logger.warning(
                 f"Calculated position size {adjusted_position_size} is below minimum quantity {min_qty}"
@@ -91,7 +134,7 @@ def calculate_position_size(
             adjusted_position_size = min_qty
             logger.info(f"Adjusted to minimum quantity: {adjusted_position_size}")
 
-        # 6. Check against minimum notional value
+        # 9. Check against minimum notional value
         notional_value = adjusted_position_size * current_price
 
         if notional_value < min_notional:
@@ -120,17 +163,17 @@ def calculate_position_size(
             notional_value = adjusted_position_size * current_price
             logger.info(f"New notional value: {notional_value}")
 
-        # 7. Check if there's enough balance for the position
-        required_balance = adjusted_position_size * current_price
+        # 10. Check if there's enough balance for the position
+        margin_required = (adjusted_position_size * current_price) / effective_leverage
 
-        if required_balance > available_balance:
+        if margin_required > available_balance:
             logger.warning(
-                f"Required balance {required_balance} exceeds available balance {available_balance}"
+                f"Required margin {margin_required} exceeds available balance {available_balance}"
             )
 
             # Try to adjust position size to available balance
             max_affordable_size = (
-                available_balance * Decimal("0.99")
+                available_balance * Decimal("0.99") * effective_leverage
             ) / current_price  # 99% of balance for fees
             adjusted_position_size = Decimal(
                 round_step_size(max_affordable_size, step_size)
@@ -154,13 +197,13 @@ def calculate_position_size(
                 f"Position size adjusted for available balance: {adjusted_position_size}"
             )
 
-        # 8. Final check for all requirements
+        # 11. Final check for all requirements
         if (
             adjusted_position_size >= min_qty
             and adjusted_position_size * current_price >= min_notional
-            and adjusted_position_size * current_price <= available_balance
+            and (adjusted_position_size * current_price) / effective_leverage
+            <= available_balance
         ):
-
             # Format to correct precision
             from bot.utils import format_quantity
 
@@ -169,7 +212,11 @@ def calculate_position_size(
 
             logger.info(f"Final position size: {final_size}")
             logger.info(f"Estimated cost: {final_size * current_price}")
+            logger.info(
+                f"Margin required: {(final_size * current_price) / effective_leverage}"
+            )
             logger.info(f"Risk per trade: {risk_amount} ({risk_percent*100}%)")
+            logger.info(f"Leverage used: {effective_leverage}x")
 
             return final_size, "success"
         else:
@@ -218,3 +265,37 @@ def calculate_pnl(
         pnl_percent = (Decimal("1") - exit_price / entry_price) * Decimal("100")
 
     return pnl_amount, pnl_percent
+
+
+def calculate_partial_exit_quantity(
+    position_quantity: Decimal,
+    exit_level: int = 1,
+    first_exit_percent: Decimal = Decimal("0.5"),
+    second_exit_percent: Decimal = Decimal("0.3"),
+) -> Decimal:
+    """
+    Calculate quantity to exit for partial profit taking
+
+    Parameters
+    ----------
+    position_quantity : Decimal
+        Total position quantity
+    exit_level : int
+        Exit level (1 = first exit, 2 = second exit)
+    first_exit_percent : Decimal
+        Percentage to exit at first target (e.g., 0.5 = 50%)
+    second_exit_percent : Decimal
+        Percentage to exit at second target
+
+    Returns
+    -------
+    Decimal
+        Quantity to exit
+    """
+    if exit_level == 1:
+        return position_quantity * first_exit_percent
+    elif exit_level == 2:
+        return position_quantity * second_exit_percent
+    else:
+        # Final exit - all remaining
+        return position_quantity
