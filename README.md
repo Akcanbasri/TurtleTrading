@@ -1,91 +1,91 @@
-# Gelişmiş Turtle Trading Bot
+# Advanced Turtle Trading Bot
 
-Bu proje, Turtle Trading stratejisini kullanan ve çeşitli gelişmiş özelliklerle zenginleştirilmiş bir algoritmik ticaret botudur.
+This project is an algorithmic trading bot that employs the Turtle Trading strategy, enriched with a variety of advanced features.
 
-## Özellikler
+## Features
 
-- **Çoklu Zaman Dilimi Analizi**: Farklı zaman dilimlerinde trendleri tespit etme
-- **Piramit Pozisyon Açma**: Trendin güçlenmesi durumunda pozisyonu artırma
-- **Gelişmiş Çıkış Stratejisi**: Kısmi kar alma hedefleri ve trailing stop
-- **Trend Filtreleri**: ADX ve Hareketli Ortalama (MA) filtrelemeleri
-- **Akıllı Risk Yönetimi**: Pozisyon başına ve toplam risk limitlemesi
+- **Multi-Timeframe Analysis**: Detect trends across different timeframes
+- **Pyramiding Positions**: Increase the position as the trend strengthens
+- **Advanced Exit Strategy**: Partial profit-taking targets and trailing stop
+- **Trend Filters**: ADX and Moving Average (MA) filtering
+- **Smart Risk Management**: Limits risk per position and overall risk
 
-## Strateji Mantığı
+## Strategy Logic
 
-Bu bot, şu temel bileşenlere dayalı bir ticaret stratejisi uygular:
+This bot implements a trading strategy based on the following key components:
 
-1. **Trend Analizi**:
-   - 1 günlük grafikte 200 günlük hareketli ortalama ile ana trendler belirlenir
-   - ADX göstergesi ile trend gücü ölçülür (25 üzeri değerler güçlü trend)
+1. **Trend Analysis**:
+   - The main trends are determined using the 200-day moving average on a 1-day chart
+   - Trend strength is measured using the ADX indicator (values above 25 indicate a strong trend)
 
-2. **Giriş Sinyalleri**:
-   - Donchian Kanalları trend-takip eden giriş sinyalleri üretir
-   - Giriş sinyalleri ana trend yönü ile karşılaştırılarak onaylanır
+2. **Entry Signals**:
+   - Donchian Channels generate trend-following entry signals
+   - Entry signals are confirmed by comparing them with the primary trend direction
 
-3. **Piramitleme**:
-   - İlk giriş: Planlanmış pozisyon boyutunun %40'ı
-   - Ek girişler: Kalan büyüklüğün %30'luk dilimleri
+3. **Pyramiding**:
+   - Initial entry: 40% of the planned position size
+   - Additional entries: 30% slices of the remaining size
 
-4. **Çıkış Stratejisi**:
-   - İlk Hedef: 3 ATR mesafesinde pozisyonun %50'si çıkılır
-   - İkinci Hedef: 5 ATR mesafesinde pozisyonun %30'u çıkılır
-   - Son dilim için: Trailing stop kullanılır
+4. **Exit Strategy**:
+   - First Target: Exit 50% of the position at a distance of 3 ATR
+   - Second Target: Exit 30% of the position at a distance of 5 ATR
+   - For the final slice: Use a trailing stop
 
-5. **Kaldıraç Yönetimi**:
-   - Trend yönünde işlemlerde: 2-3x kaldıraç
-   - Trend tersine işlemlerde: Maksimum 1.5x kaldıraç
+5. **Leverage Management**:
+   - For trades in the direction of the trend: 2-3x leverage
+   - For trades against the trend: Maximum 1.5x leverage
 
-## Kurulum
+## Installation
 
-1. Depoyu klonlayın:
-```bash
-git clone [repo-url]
-cd TurtleTrading
-```
+1. Clone the repository:
+   ```bash
+   git clone [repo-url]
+   cd TurtleTrading
+   ```
 
-2. Gerekli paketleri yükleyin:
-```bash
-pip install -r requirements.txt
-```
+2. Install the required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-3. `.env` dosyasını düzenleyin:
-```
-# API anahtarlarınızı buraya yazın
-BINANCE_API_KEY=your_api_key_here
-BINANCE_API_SECRET=your_api_secret_here
-USE_TESTNET=True  # Gerçek ticarete başlamadan önce test modunda çalıştırın
-```
+3. Edit the `.env` file:
+   ```
+   # Write your API keys here
+   BINANCE_API_KEY=your_api_key_here
+   BINANCE_API_SECRET=your_api_secret_here
+   USE_TESTNET=True  # Run in test mode before starting live trading
+   ```
 
-4. Strateji parametrelerini `.env` dosyasında isteğe göre ayarlayın:
-```
-# Risk parametrelerini kendi tercihlerinize göre ayarlayın
-RISK_PER_TRADE=0.02  # Sermayenizin %2'si
-STOP_LOSS_ATR_MULTIPLE=1.5  # ATR'nin 1.5 katı stop loss mesafesi
-```
+4. Adjust the strategy parameters in the `.env` file as desired:
+   ```
+   # Adjust risk parameters according to your preference
+   RISK_PER_TRADE=0.02  # 2% of your capital
+   STOP_LOSS_ATR_MULTIPLE=1.5  # Stop loss distance is 1.5 times the ATR
+   ```
 
-## Çalıştırma
+## Running
 
-Botu başlatmak için:
+To start the bot:
 
 ```bash
 python turtle_trading_bot.py
 ```
 
-## Dikkat Edilmesi Gerekenler
+## Important Considerations
 
-- Gerçek parayla kullanmadan önce testnet üzerinde test edin
-- Risk yönetimi parametrelerini kendi risk toleransınıza göre ayarlayın
-- Bot, sermayenizin tamamını kaybetme riskiyle çalışır, sorumluluk size aittir
+- Test on the testnet before using real money
+- Adjust risk management parameters according to your risk tolerance
+- The bot operates with the risk of losing your entire capital; you are responsible for its use
 
-## Özelleştirme
+## Customization
 
-Strateji parametrelerini `.env` dosyasında değiştirerek botun davranışını özelleştirebilirsiniz:
+You can customize the behavior of the bot by modifying the strategy parameters in the `.env` file:
 
-- `USE_MULTI_TIMEFRAME`: Çoklu zaman dilimi analizini açar/kapatır
-- `USE_PYRAMIDING`: Piramitleme stratejisini açar/kapatır
-- `USE_TRAILING_STOP`: Trailing stop kullanımını açar/kapatır
-- `USE_PARTIAL_EXITS`: Kısmi kar alma hedeflerini açar/kapatır
-- `USE_ADX_FILTER` ve `USE_MA_FILTER`: Trend filtrelerini açar/kapatır
+- `USE_MULTI_TIMEFRAME`: Enables/disables multi-timeframe analysis
+- `USE_PYRAMIDING`: Enables/disables the pyramiding strategy
+- `USE_TRAILING_STOP`: Enables/disables the use of trailing stop
+- `USE_PARTIAL_EXITS`: Enables/disables partial profit-taking targets
+- `USE_ADX_FILTER` and `USE_MA_FILTER`: Enables/disables trend filters
 
 ## Project Structure
 
@@ -114,11 +114,11 @@ turtle_trading_bot/
    ```
    pip install -r requirements.txt
    ```
-3. Copy `.env.example` to `.env` and update with your Binance API credentials:
+3. Copy `.env.example` to `.env` and update it with your Binance API credentials:
    ```
    cp .env.example .env
    ```
-4. Edit parameters in `.env` as needed (risk, timeframe, symbol, etc.)
+4. Edit the parameters in `.env` as needed (risk, timeframe, symbol, etc.)
 
 ## Usage
 

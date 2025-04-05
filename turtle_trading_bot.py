@@ -41,6 +41,11 @@ def main():
         default=30,
         help="Number of days to backtest (default: 30)",
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run in demo mode with synthetic data (no API key needed)",
+    )
     args = parser.parse_args()
 
     logger.info("Initializing Turtle Trading Bot")
@@ -52,7 +57,20 @@ def main():
             f"Initializing Binance client in {'TESTNET' if use_testnet else 'PRODUCTION'} mode"
         )
 
-        bot = TurtleTradingBot(use_testnet=use_testnet)
+        # Use demo mode if specified (no API key needed)
+        if args.demo:
+            logger.info("Running in DEMO mode with synthetic data - no API key needed")
+            from bot.exchange import BinanceExchange
+
+            # Create dummy API credentials for demo mode
+            api_key = "demo_key"
+            api_secret = "demo_secret"
+            bot = TurtleTradingBot(
+                use_testnet=True, api_key=api_key, api_secret=api_secret, demo_mode=True
+            )
+        else:
+            # Normal mode - use API keys from environment variables
+            bot = TurtleTradingBot(use_testnet=use_testnet)
 
         if args.backtest:
             logger.info(f"Running backtest for the last {args.days} days")
@@ -62,9 +80,10 @@ def main():
         # Main bot loop
         while True:
             try:
-                if args.test:
+                if args.test or args.demo:
+                    mode_desc = "TEST" if args.test else "DEMO"
                     logger.info(
-                        "Running in test mode - analyzing market without executing trades"
+                        f"Running in {mode_desc} mode - analyzing market without executing trades"
                     )
                     bot.analyze_only()
                 else:

@@ -70,13 +70,23 @@ class TurtleTradingBot:
     risk management through position sizing based on ATR.
     """
 
-    def __init__(self, use_testnet=True, config_file=".env"):
+    def __init__(
+        self,
+        use_testnet=True,
+        config_file=".env",
+        api_key=None,
+        api_secret=None,
+        demo_mode=False,
+    ):
         """
         Initialize the bot.
 
         Args:
             use_testnet: Whether to use the Binance testnet
             config_file: Path to the configuration file
+            api_key: Optional API key (overrides config file)
+            api_secret: Optional API secret (overrides config file)
+            demo_mode: Whether to run in demo mode with synthetic data
         """
         # Setup logging
         self.logger = logging.getLogger("turtle_trading_bot")
@@ -89,11 +99,21 @@ class TurtleTradingBot:
         if use_testnet is not None:
             self.config.use_testnet = use_testnet
 
+        # Store demo mode flag
+        self.demo_mode = demo_mode
+        if demo_mode:
+            self.logger.info("Running in demo mode with synthetic data")
+
         # Extract common settings for easier access
         self.symbol = self.config.symbol
         self.timeframe = self.config.timeframe
         self.quote_asset = self.config.quote_asset
         self.base_asset = self.config.base_asset
+
+        # Use provided API keys if available
+        if api_key is not None and api_secret is not None:
+            self.config.api_key = api_key
+            self.config.api_secret = api_secret
 
         # Initialize exchange interface
         self.exchange = BinanceExchange(
@@ -107,6 +127,39 @@ class TurtleTradingBot:
 
         # Initialize position state
         self.position = self._load_position_state()
+
+        # Initialize symbol info
+        try:
+            if self.demo_mode:
+                # Create a default SymbolInfo for demo mode
+                from bot.models import SymbolInfo
+
+                self.symbol_info = SymbolInfo(
+                    price_precision=2,
+                    quantity_precision=4,
+                    min_qty=Decimal("0.001"),
+                    step_size=Decimal("0.001"),
+                    min_notional=Decimal("10"),
+                )
+                self.logger.info("Using default symbol info for demo mode")
+            else:
+                self.symbol_info = self.exchange.get_symbol_info(self.symbol)
+        except Exception as e:
+            if self.demo_mode:
+                # Create a default SymbolInfo for demo mode
+                from bot.models import SymbolInfo
+
+                self.symbol_info = SymbolInfo(
+                    price_precision=2,
+                    quantity_precision=4,
+                    min_qty=Decimal("0.001"),
+                    step_size=Decimal("0.001"),
+                    min_notional=Decimal("10"),
+                )
+                self.logger.info("Using default symbol info for demo mode")
+            else:
+                self.logger.error(f"Error getting symbol info: {e}")
+                raise
 
         # Log bot initialization
         self._log_initialization()
@@ -428,7 +481,7 @@ class TurtleTradingBot:
 
     def run(self) -> None:
         """
-        Main function to run the trading bot in a continuous loop
+        Main bot execution loop
         """
         try:
             # Check if we have an active position and log it
@@ -1180,3 +1233,48 @@ class TurtleTradingBot:
                 self.logger.info(
                     f"Updated trailing stop from {old_stop:.2f} to {new_stop:.2f}"
                 )
+
+    def update_market_data(self):
+        """
+        Update market data for current trading symbol
+        """
+        try:
+            # Fetch latest market data
+            lookback = (
+                max(
+                    self.config.dc_length_enter,
+                    self.config.dc_length_exit,
+                    self.config.atr_length,
+                )
+                + 50
+            )
+
+            # Fetch data for all required timeframes
+            if self.config.use_multi_timeframe:
+                # Get data for trend timeframe
+                self.trend_data = self.exchange.fetch_historical_data(
+                    self.config.symbol, self.config.trend_timeframe, lookback
+                )
+
+                # Get data for entry timeframe
+                self.entry_data = self.exchange.fetch_historical_data(
+                    self.config.symbol, self.config.entry_timeframe, lookback
+                )
+
+                # Get data for base timeframe
+                self.market_data = self.exchange.fetch_historical_data(
+                    self.config.symbol, self.config.timeframe, lookback
+                )
+            else:
+                # Just get base timeframe data
+                self.market_data = self.exchange.fetch_historical_data(
+                    self.config.symbol, self.config.timeframe, lookback
+                )
+
+            # Update current price
+            self.current_price = self.exchange.get_current_price(self.config.symbol)
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Error updating market data: {e}")
+            return False
