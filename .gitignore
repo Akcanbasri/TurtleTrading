@@ -22,6 +22,7 @@ wheels/
 
 # Environment
 .env
+.env-*
 .venv
 env/
 venv/
@@ -32,24 +33,58 @@ venv.bak/
 # Logs
 logs/
 *.log
+log/
 
-# Bot state
+# Bot state and data
 config/
+data/
 *.json
+*.csv
+backtest_results/
+optimization_results/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.sublime-*
+.project
+.pydevproject
 
 # OS specific
 .DS_Store
 Thumbs.db
+.directory
+desktop.ini
 
 # Testing
 .coverage
 htmlcov/
+.pytest_cache/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
 
 # Jupyter Notebook
-.ipynb_checkpoints 
+.ipynb_checkpoints
+*.ipynb
+
+# Credentials and sensitive info
+apies.txt
+*_key*
+*_secret*
+credentials.txt
+auth/
+
+# Temporary files
+*.tmp
+*.bak
+*.pid
+*.seed
+tmp/
+
+# Documentation build
+docs/_build/
+docs/site/

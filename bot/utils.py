@@ -263,15 +263,24 @@ def save_position_state(
     """
     logger = logging.getLogger("turtle_trading_bot")
 
+    # Convert position to dictionary
     state = {
-        "position_active": position.active,
+        "active": position.active,
         "entry_price": str(position.entry_price),
-        "position_quantity": str(position.quantity),
+        "quantity": str(position.quantity),
         "stop_loss_price": str(position.stop_loss_price),
         "take_profit_price": str(position.take_profit_price),
-        "position_side": position.side,
+        "side": position.side,
         "entry_time": position.entry_time,
         "entry_atr": str(position.entry_atr),
+        "entry_count": position.entry_count,
+        "last_entry_time": position.last_entry_time,
+        "first_target_reached": position.first_target_reached,
+        "second_target_reached": position.second_target_reached,
+        "partial_exit_taken": position.partial_exit_taken,
+        "trailing_stop_price": (
+            str(position.trailing_stop_price) if position.trailing_stop_price else None
+        ),
         "symbol": symbol,
         "last_update": int(time.time() * 1000),
     }
@@ -323,16 +332,27 @@ def load_position_state(
             )
             return None
 
+        # Handle trailing stop price (might be None)
+        trailing_stop_price = None
+        if state.get("trailing_stop_price") is not None:
+            trailing_stop_price = Decimal(state.get("trailing_stop_price"))
+
         # Load state
         position = PositionState(
-            active=state.get("position_active", False),
+            active=state.get("active", False),
             entry_price=Decimal(state.get("entry_price", "0")),
-            quantity=Decimal(state.get("position_quantity", "0")),
+            quantity=Decimal(state.get("quantity", "0")),
             stop_loss_price=Decimal(state.get("stop_loss_price", "0")),
             take_profit_price=Decimal(state.get("take_profit_price", "0")),
-            side=state.get("position_side", ""),
+            side=state.get("side", ""),
             entry_time=state.get("entry_time", 0),
             entry_atr=Decimal(state.get("entry_atr", "0")),
+            trailing_stop_price=trailing_stop_price or Decimal("0"),
+            entry_count=state.get("entry_count", 0),
+            last_entry_time=state.get("last_entry_time", 0),
+            first_target_reached=state.get("first_target_reached", False),
+            second_target_reached=state.get("second_target_reached", False),
+            partial_exit_taken=state.get("partial_exit_taken", False),
         )
 
         logger.info(f"Bot state loaded from {state_file}")

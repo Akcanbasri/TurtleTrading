@@ -1,45 +1,61 @@
-# Advanced Turtle Trading Bot
+# TurtleTrading - Advanced Algorithmic Trading Bot
 
-This project is an algorithmic trading bot that employs the Turtle Trading strategy, enriched with a variety of advanced features.
+A robust algorithmic trading bot implementing the Turtle Trading strategy with advanced features including dynamic leverage, multi-timeframe analysis, and sophisticated risk management.
 
-## Features
+## Key Features
 
-- **Multi-Timeframe Analysis**: Detect trends across different timeframes
-- **Pyramiding Positions**: Increase the position as the trend strengthens
-- **Advanced Exit Strategy**: Partial profit-taking targets and trailing stop
-- **Trend Filters**: ADX and Moving Average (MA) filtering
-- **Smart Risk Management**: Limits risk per position and overall risk
+- **Dynamic Leverage Management**: Automatically adjusts leverage based on account balance and trade direction
+- **Multi-Timeframe Analysis**: Identifies trends across different timeframes for better entry/exit points
+- **Smart Pyramiding**: Strategically increases position size as the trend strengthens
+- **Advanced Exit Strategies**: Trailing stops and partial profit taking at key targets
+- **Comprehensive Risk Management**: Adaptive risk per trade with maximum exposure limits
+- **Trend Filters**: ADX strength and Moving Average alignment filters
+
+## Dynamic Leverage System
+
+The bot implements a sophisticated leverage management system that:
+
+1. **Adapts to Account Size**:
+   - Small accounts (<20 USDT): Maximum 5x leverage
+   - Medium accounts (<50 USDT): Maximum 7x leverage
+   - Standard accounts (<100 USDT): Maximum 10x leverage
+   - Larger accounts: Uses configured leverage
+
+2. **Trend-Based Adjustments**:
+   - Higher leverage for trend-aligned trades (up to MAX_LEVERAGE_TREND)
+   - Reduced leverage for counter-trend trades (up to MAX_LEVERAGE_COUNTER)
+
+3. **Risk Protection**:
+   - Enforces minimum position sizes (5 USDT by default)
+   - Maintains consistent risk exposure regardless of leverage
 
 ## Strategy Logic
 
-This bot implements a trading strategy based on the following key components:
+The trading strategy is based on these core components:
 
 1. **Trend Analysis**:
-   - The main trends are determined using the 200-day moving average on a 1-day chart
-   - Trend strength is measured using the ADX indicator (values above 25 indicate a strong trend)
+   - Primary trend identification using Moving Averages on higher timeframes
+   - Trend strength measurement via ADX (values above 25 indicate strong trends)
 
 2. **Entry Signals**:
-   - Donchian Channels generate trend-following entry signals
-   - Entry signals are confirmed by comparing them with the primary trend direction
+   - Donchian Channel breakouts generate trend-following entry signals
+   - Signal confirmation through multi-timeframe trend alignment
 
-3. **Pyramiding**:
-   - Initial entry: 40% of the planned position size
-   - Additional entries: 30% slices of the remaining size
+3. **Position Management**:
+   - Initial entry: 40% of the calculated position size
+   - Additional entries: 30% increments when trend strengthens
+   - Dynamic stop loss placement based on ATR volatility
 
-4. **Exit Strategy**:
-   - First Target: Exit 50% of the position at a distance of 3 ATR
-   - Second Target: Exit 30% of the position at a distance of 5 ATR
-   - For the final slice: Use a trailing stop
-
-5. **Leverage Management**:
-   - For trades in the direction of the trend: 2-3x leverage
-   - For trades against the trend: Maximum 1.5x leverage
+4. **Intelligent Exit Strategy**:
+   - First Target: Exit 50% of the position at 3x ATR
+   - Trailing stop: Activated at predefined profit threshold
+   - Systematic exits on trend reversal signals
 
 ## Installation
 
 1. Clone the repository:
    ```bash
-   git clone [repo-url]
+   git clone https://github.com/yourusername/TurtleTrading.git
    cd TurtleTrading
    ```
 
@@ -48,22 +64,25 @@ This bot implements a trading strategy based on the following key components:
    pip install -r requirements.txt
    ```
 
-3. Edit the `.env` file:
+3. Configure the `.env` file:
    ```
-   # Write your API keys here
+   # Enter your API keys
    BINANCE_API_KEY=your_api_key_here
    BINANCE_API_SECRET=your_api_secret_here
-   USE_TESTNET=True  # Run in test mode before starting live trading
+   
+   # Set to True for testing, False for live trading
+   USE_TESTNET=True
+   
+   # Trading parameters
+   SYMBOL=BTCUSDT
+   TIMEFRAME=1h
+   
+   # Risk parameters
+   RISK_PER_TRADE=0.02
+   STOP_LOSS_ATR_MULTIPLE=1.5
    ```
 
-4. Adjust the strategy parameters in the `.env` file as desired:
-   ```
-   # Adjust risk parameters according to your preference
-   RISK_PER_TRADE=0.02  # 2% of your capital
-   STOP_LOSS_ATR_MULTIPLE=1.5  # Stop loss distance is 1.5 times the ATR
-   ```
-
-## Running
+## Running the Bot
 
 To start the bot:
 
@@ -71,86 +90,79 @@ To start the bot:
 python turtle_trading_bot.py
 ```
 
-## Important Considerations
+For analysis-only mode (no trading):
 
-- Test on the testnet before using real money
-- Adjust risk management parameters according to your risk tolerance
-- The bot operates with the risk of losing your entire capital; you are responsible for its use
+```bash
+python turtle_trading_bot.py --analyze
+```
 
-## Customization
+## Configuration Options
 
-You can customize the behavior of the bot by modifying the strategy parameters in the `.env` file:
+### Core Trading Parameters
 
-- `USE_MULTI_TIMEFRAME`: Enables/disables multi-timeframe analysis
-- `USE_PYRAMIDING`: Enables/disables the pyramiding strategy
-- `USE_TRAILING_STOP`: Enables/disables the use of trailing stop
-- `USE_PARTIAL_EXITS`: Enables/disables partial profit-taking targets
-- `USE_ADX_FILTER` and `USE_MA_FILTER`: Enables/disables trend filters
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `SYMBOL` | Trading pair | BTCUSDT |
+| `TIMEFRAME` | Candle timeframe | 1h |
+| `RISK_PER_TRADE` | Risk percentage per trade | 0.02 (2%) |
+| `STOP_LOSS_ATR_MULTIPLE` | ATR multiplier for stop loss | 1.5 |
+
+### Advanced Features
+
+| Feature | Parameter | Description |
+|---------|-----------|-------------|
+| Multi-Timeframe | `USE_MULTI_TIMEFRAME=True` | Analyze multiple timeframes |
+| Pyramiding | `USE_PYRAMIDING=True` | Add to positions in trend direction |
+| Trailing Stop | `USE_TRAILING_STOP=True` | Dynamic trailing stop loss |
+| Partial Exits | `USE_PARTIAL_EXITS=True` | Take profits at predetermined levels |
+
+### Leverage Settings
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `LEVERAGE` | Base leverage value | 10 |
+| `MAX_LEVERAGE_TREND` | Max leverage for trend-aligned trades | 3 |
+| `MAX_LEVERAGE_COUNTER` | Max leverage for counter-trend trades | 1.5 |
 
 ## Project Structure
 
 ```
-turtle_trading_bot/
+TurtleTrading/
 ├── turtle_trading_bot.py    # Main entry point
-├── .env                     # Configuration (API keys, trading parameters)
-├── .env.example             # Example configuration template
+├── .env                     # Configuration file
 ├── requirements.txt         # Dependencies
-├── logs/                    # Trading logs directory
-├── config/                  # Bot state and configuration files
+├── logs/                    # Trading logs
+├── config/                  # Bot state and configurations
 └── bot/                     # Core modules
-    ├── __init__.py          # Package initialization
-    ├── core.py              # TurtleTradingBot class
-    ├── exchange.py          # Binance exchange operations
-    ├── indicators.py        # Technical indicators and signal detection
-    ├── models.py            # Data models and type definitions
-    ├── risk.py              # Risk management and position sizing
+    ├── core.py              # Main bot implementation
+    ├── exchange.py          # Exchange interaction
+    ├── indicators.py        # Technical indicators
+    ├── models.py            # Data models and state tracking
+    ├── risk.py              # Risk management
     └── utils.py             # Utility functions
 ```
 
-## Setup and Configuration
+## Risk Management
 
-1. Clone the repository
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Copy `.env.example` to `.env` and update it with your Binance API credentials:
-   ```
-   cp .env.example .env
-   ```
-4. Edit the parameters in `.env` as needed (risk, timeframe, symbol, etc.)
+The bot employs multiple layers of risk management:
 
-## Usage
+1. **Per-Trade Risk Limit**: Each trade risks only a percentage of your balance
+2. **Dynamic Position Sizing**: Position size calculated based on ATR volatility
+3. **Maximum Exposure**: Total risk across all positions is capped
+4. **Stop Loss Protection**: Automatic stop loss for every position
+5. **Adaptive Leverage**: Lower leverage for smaller accounts and counter-trend trades
 
-Run the bot:
+## Important Notes
 
-```
-python turtle_trading_bot.py
-```
+- Always test on a testnet before running with real funds
+- Start with small position sizes and conservative risk parameters
+- The bot performs best in trending markets
+- Performance may vary depending on market conditions
+- Regularly check and adjust parameters based on performance
 
-## Configuration Parameters
+## Contribution
 
-Edit these in the `.env` file:
-
-- **API_KEY/API_SECRET**: Your Binance API credentials
-- **USE_TESTNET**: Set to True for testing, False for live trading
-- **SYMBOL**: Trading pair (e.g., BTCUSDT)
-- **TIMEFRAME**: Candlestick interval (e.g., 1h, 4h, 1d)
-- **DC_LENGTH_ENTER**: Donchian Channel period for entries
-- **DC_LENGTH_EXIT**: Donchian Channel period for exits
-- **ATR_LENGTH**: ATR calculation period
-- **RISK_PER_TRADE**: Risk percentage per trade (0.02 = 2%)
-- **STOP_LOSS_ATR_MULTIPLE**: ATR multiplier for stop loss placement
-
-## Improvements from Original Codebase
-
-- **Object-Oriented Design**: Proper encapsulation of state and behavior
-- **Type Hints**: Enhanced code quality and IDE support
-- **Modular Structure**: Separate modules for different concerns
-- **Improved Error Handling**: Consistent exception handling
-- **Better Documentation**: Comprehensive docstrings and code comments
-- **Short Position Support**: Added ability to trade in both directions
-- **Enhanced Testability**: Easier to write unit tests
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
@@ -158,4 +170,4 @@ Edit these in the `.env` file:
 
 ## Disclaimer
 
-Trading cryptocurrencies carries significant risk. This bot is provided for educational purposes only. Use at your own risk.
+Trading cryptocurrencies carries significant risk of loss. This bot is provided for educational purposes only. The developers are not responsible for any financial losses incurred from using this software. Use at your own risk.

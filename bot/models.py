@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, Union, Any, Literal, List
 import os
+import json
+from pathlib import Path
 from dotenv import load_dotenv
 
 
@@ -36,6 +38,13 @@ class PositionState:
     entries: List[Dict[str, Any]] = None
     current_entry_level: int = 0
     trailing_stop_price: Decimal = Decimal("0")
+    # Pyramid tracking
+    entry_count: int = 0
+    last_entry_time: int = 0
+    # Partial exits tracking
+    first_target_reached: bool = False
+    second_target_reached: bool = False
+    partial_exit_taken: bool = False
 
     def __post_init__(self):
         if self.entries is None:
@@ -54,6 +63,55 @@ class PositionState:
         self.entries = []
         self.current_entry_level = 0
         self.trailing_stop_price = Decimal("0")
+        self.entry_count = 0
+        self.last_entry_time = 0
+        self.first_target_reached = False
+        self.second_target_reached = False
+        self.partial_exit_taken = False
+
+
+def save_position_state(position: PositionState, symbol: str) -> None:
+    """
+    Save position state to file
+
+    Parameters
+    ----------
+    position : PositionState
+        Position state to save
+    symbol : str
+        Trading symbol
+    """
+    # Create config directory if it doesn't exist
+    config_dir = Path("config")
+    config_dir.mkdir(exist_ok=True)
+
+    # Path to state file
+    state_file = config_dir / "bot_state.json"
+
+    # Convert position to dictionary
+    position_dict = {
+        "active": position.active,
+        "entry_price": str(position.entry_price),
+        "quantity": str(position.quantity),
+        "stop_loss_price": str(position.stop_loss_price),
+        "take_profit_price": str(position.take_profit_price),
+        "side": position.side,
+        "entry_time": position.entry_time,
+        "entry_atr": str(position.entry_atr),
+        "entry_count": position.entry_count,
+        "last_entry_time": position.last_entry_time,
+        "first_target_reached": position.first_target_reached,
+        "second_target_reached": position.second_target_reached,
+        "partial_exit_taken": position.partial_exit_taken,
+        "trailing_stop_price": (
+            str(position.trailing_stop_price) if position.trailing_stop_price else None
+        ),
+        "symbol": symbol,
+    }
+
+    # Save to file
+    with open(state_file, "w") as f:
+        json.dump(position_dict, f, indent=4)
 
 
 class BotConfig:

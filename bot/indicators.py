@@ -66,29 +66,64 @@ def calculate_atr(df: pd.DataFrame, n: int, smooth_type: str = "RMA") -> pd.Data
 
     df_result = df.copy()
 
-    # Calculate true range
-    high_low = df_result["high"] - df_result["low"]
-    high_close_prev = abs(df_result["high"] - df_result["close"].shift(1))
-    low_close_prev = abs(df_result["low"] - df_result["close"].shift(1))
+    try:
+        # Ensure we have a proper DataFrame with index
+        if not isinstance(df_result, pd.DataFrame):
+            raise ValueError("Input must be a pandas DataFrame")
 
-    true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(
-        axis=1
-    )
+        # Calculate true range more robustly
+        high_low = df_result["high"] - df_result["low"]
 
-    # Calculate ATR based on smoothing type
-    if smooth_type.upper() == "RMA":
-        # RMA (Wilder's Smoothing)
-        atr = true_range.ewm(alpha=1 / n, min_periods=n, adjust=False).mean()
-    elif smooth_type.upper() == "EMA":
-        # Exponential Moving Average
-        atr = true_range.ewm(span=n, min_periods=n).mean()
-    else:
-        # Simple Moving Average
-        atr = true_range.rolling(window=n).mean()
+        # Initialize series for prev close comparisons
+        high_close_prev = pd.Series(0, index=df_result.index)
+        low_close_prev = pd.Series(0, index=df_result.index)
 
-    df_result["atr"] = atr
+        # Only calculate with shift for rows beyond the first one
+        if len(df_result) > 1:
+            close_prev = df_result["close"].shift(1)
+            # Fill first row with a reasonable default
+            close_prev.iloc[0] = df_result["close"].iloc[0]
 
-    return df_result
+            high_close_prev = (df_result["high"] - close_prev).abs()
+            low_close_prev = (df_result["low"] - close_prev).abs()
+
+        # Combine the three series and get the maximum at each position
+        true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(
+            axis=1
+        )
+
+        # Calculate ATR based on smoothing type
+        if smooth_type.upper() == "RMA":
+            # RMA (Wilder's Smoothing)
+            atr = true_range.ewm(alpha=1 / n, min_periods=n, adjust=False).mean()
+        elif smooth_type.upper() == "EMA":
+            # Exponential Moving Average
+            atr = true_range.ewm(span=n, min_periods=n).mean()
+        else:
+            # Simple Moving Average
+            atr = true_range.rolling(window=n).mean()
+
+        # Add ATR to result DataFrame
+        df_result["atr"] = atr
+
+        return df_result
+
+    except Exception as e:
+        # In case of any error, return DataFrame with default ATR
+        import logging
+
+        logger = logging.getLogger("turtle_trading_bot")
+        logger.error(f"Error calculating ATR: {e}. Using default value.")
+
+        # Set a default ATR value based on average price
+        if "close" in df_result.columns:
+            avg_price = df_result["close"].mean()
+            default_atr = avg_price * 0.02  # Use 2% of average price as default ATR
+        else:
+            default_atr = 1000  # Fallback default for BTC
+
+        df_result["atr"] = default_atr
+        return df_result
 
 
 def calculate_ma(df: pd.DataFrame, period: int, type: str = "SMA") -> pd.DataFrame:
@@ -141,86 +176,87 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     if df.empty or period <= 0:
         return df
 
+    # Make a copy to avoid modifying the original
     df_result = df.copy()
 
-    # Calculate +DM, -DM
-    df_result["high_diff"] = df_result["high"].diff()
-    df_result["low_diff"] = -df_result["low"].diff()
+    try:
+        # Ensure we have a proper DataFrame with index
+        if not isinstance(df_result, pd.DataFrame):
+            raise ValueError("Input must be a pandas DataFrame")
 
-    df_result["plus_dm"] = (
-        (df_result["high_diff"] > df_result["low_diff"]) & (df_result["high_diff"] > 0)
-    ) * df_result["high_diff"]
-    df_result["minus_dm"] = (
-        (df_result["low_diff"] > df_result["high_diff"]) & (df_result["low_diff"] > 0)
-    ) * df_result["low_diff"]
+        # Calculate +DM, -DM more reliably
+        high_diff = df_result["high"].diff().fillna(0)
+        low_diff = -df_result["low"].diff().fillna(0)
 
-    # Calculate TR
-    df_result["tr"] = df_result.apply(
-        lambda x: (
-            max(
-                [
-                    x["high"] - x["low"],
-                    abs(x["high"] - x["close"].shift(1)),
-                    abs(x["low"] - x["close"].shift(1)),
-                ]
-            )
-            if not pd.isna(x["close"].shift(1))
-            else x["high"] - x["low"]
-        ),
-        axis=1,
-    )
+        # Calculate +DM (directional movement up)
+        plus_dm = ((high_diff > low_diff) & (high_diff > 0)) * high_diff
+        plus_dm = plus_dm.fillna(0)
 
-    # Calculate smoothed values
-    df_result["tr_" + str(period)] = df_result["tr"].rolling(window=period).sum()
-    df_result["plus_dm_" + str(period)] = (
-        df_result["plus_dm"].rolling(window=period).sum()
-    )
-    df_result["minus_dm_" + str(period)] = (
-        df_result["minus_dm"].rolling(window=period).sum()
-    )
+        # Calculate -DM (directional movement down)
+        minus_dm = ((low_diff > high_diff) & (low_diff > 0)) * low_diff
+        minus_dm = minus_dm.fillna(0)
 
-    # Calculate +DI, -DI
-    df_result["plus_di_" + str(period)] = (
-        100 * df_result["plus_dm_" + str(period)] / df_result["tr_" + str(period)]
-    )
-    df_result["minus_di_" + str(period)] = (
-        100 * df_result["minus_dm_" + str(period)] / df_result["tr_" + str(period)]
-    )
+        # Calculate true range without using apply
+        high_low = df_result["high"] - df_result["low"]
+        high_close_prev = pd.Series(0, index=df_result.index)
+        low_close_prev = pd.Series(0, index=df_result.index)
 
-    # Calculate DX and ADX
-    df_result["dx_" + str(period)] = (
-        100
-        * abs(
-            df_result["plus_di_" + str(period)] - df_result["minus_di_" + str(period)]
-        )
-        / (df_result["plus_di_" + str(period)] + df_result["minus_di_" + str(period)])
-    )
-    df_result["adx_" + str(period)] = (
-        df_result["dx_" + str(period)].rolling(window=period).mean()
-    )
+        # Only calculate with shift for rows beyond the first one
+        if len(df_result) > 1:
+            close_prev = df_result["close"].shift(1)
+            high_close_prev = (df_result["high"] - close_prev).abs()
+            low_close_prev = (df_result["low"] - close_prev).abs()
 
-    # Simplify column names
-    df_result["plus_di"] = df_result["plus_di_" + str(period)]
-    df_result["minus_di"] = df_result["minus_di_" + str(period)]
-    df_result["adx"] = df_result["adx_" + str(period)]
+        # True range is the greatest of the three
+        tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
 
-    # Clean up dataframe by dropping temporary columns
-    columns_to_drop = [
-        "high_diff",
-        "low_diff",
-        "plus_dm",
-        "minus_dm",
-        "tr",
-        "tr_" + str(period),
-        "plus_dm_" + str(period),
-        "minus_dm_" + str(period),
-        "plus_di_" + str(period),
-        "minus_di_" + str(period),
-        "dx_" + str(period),
-    ]
-    df_result = df_result.drop(columns=columns_to_drop, errors="ignore")
+        # Calculate smoothed values
+        # Instead of rolling sum, we'll calculate the exponential moving average (Wilder's smoothing)
+        smooth_period = period
 
-    return df_result
+        # Initialize smoothed series
+        smoothed_tr = tr.ewm(
+            alpha=1 / smooth_period, min_periods=period, adjust=False
+        ).mean()
+        smoothed_plus_dm = plus_dm.ewm(
+            alpha=1 / smooth_period, min_periods=period, adjust=False
+        ).mean()
+        smoothed_minus_dm = minus_dm.ewm(
+            alpha=1 / smooth_period, min_periods=period, adjust=False
+        ).mean()
+
+        # Calculate +DI and -DI
+        plus_di = 100 * smoothed_plus_dm / smoothed_tr
+        minus_di = 100 * smoothed_minus_dm / smoothed_tr
+
+        # Calculate DX
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).fillna(0)
+        # Replace infinity values with 0
+        dx = dx.replace([np.inf, -np.inf], 0)
+
+        # Calculate ADX
+        adx = dx.ewm(alpha=1 / smooth_period, min_periods=period, adjust=False).mean()
+
+        # Add columns to result DataFrame
+        df_result["plus_di"] = plus_di
+        df_result["minus_di"] = minus_di
+        df_result["adx"] = adx
+
+        return df_result
+
+    except Exception as e:
+        # In case of any error, return DataFrame with default ADX value
+        import logging
+
+        logger = logging.getLogger("turtle_trading_bot")
+        logger.error(f"Error calculating ADX: {e}. Using default values.")
+
+        # Add default ADX columns
+        df_result["plus_di"] = 25.0
+        df_result["minus_di"] = 25.0
+        df_result["adx"] = 25.0
+
+        return df_result
 
 
 def calculate_indicators(

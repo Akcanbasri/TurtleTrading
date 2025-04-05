@@ -10,7 +10,13 @@ import sys
 import time
 import logging
 import argparse
+import importlib
 from dotenv import load_dotenv
+import numpy as np
+
+# Try to force-reload the bot module to ensure we get the latest changes
+if "bot" in sys.modules:
+    importlib.reload(sys.modules["bot"])
 
 from bot import TurtleTradingBot, setup_logger
 
@@ -85,7 +91,13 @@ def main():
                     logger.info(
                         f"Running in {mode_desc} mode - analyzing market without executing trades"
                     )
-                    bot.analyze_only()
+                    try:
+                        bot.analyze_only()
+                    except Exception as e:
+                        import traceback
+
+                        logger.error(f"Error during analysis: {e}")
+                        logger.error(traceback.format_exc())  # Print full traceback
                 else:
                     bot.run_trading_cycle()
 
@@ -95,7 +107,10 @@ def main():
                 logger.info("Bot stopped by user")
                 break
             except Exception as e:
+                import traceback
+
                 logger.error(f"Error in main loop: {e}")
+                logger.error(traceback.format_exc())
                 time.sleep(60)  # Wait a bit longer on error
 
     except Exception as e:
