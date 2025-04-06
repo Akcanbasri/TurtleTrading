@@ -8,6 +8,10 @@ from decimal import Decimal
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
+import websocket
+import json
+import threading
+from queue import Queue
 
 try:
     # Futures API için yeni import
@@ -25,6 +29,189 @@ except ImportError:
 
 from bot.models import SymbolInfo, TradeSide
 from bot.utils import format_price, format_quantity
+
+
+class BinanceWebSocketManager:
+    def __init__(self, symbol, callback, use_testnet=True):
+        self.symbol = symbol.lower()
+        self.callback = callback
+        self.ws = None
+        self.thread = None
+        self.data_queue = Queue()
+        self.is_connected = False
+        self.use_testnet = use_testnet
+        self.reconnect_count = 0
+        self.max_reconnects = 5
+        self.reconnect_delay = 5  # seconds
+        self.should_reconnect = True
+
+        # WebSocket URL'leri
+        self.ws_base_url = (
+            "wss://fstream.binance.com/ws/"
+            if not use_testnet
+            else "wss://stream.binancefuture.com/ws/"
+        )
+        self.last_ping_time = time.time()
+        self.logger = logging.getLogger("turtle_trading_bot")
+
+    def _on_message(self, ws, message):
+        data = json.loads(message)
+
+        # Handle pong responses
+        if "result" in data and data["result"] is None and "id" in data:
+            self.logger.debug("Received pong from server")
+            return
+
+        # Process kline data
+        if "k" in data:
+            kline = self._process_kline_data(data)
+            self.data_queue.put({"type": "kline", "data": kline})
+        # Process bookTicker data
+        elif "b" in data and "a" in data:
+            ticker = self._process_ticker_data(data)
+            self.data_queue.put({"type": "ticker", "data": ticker})
+
+    def _process_kline_data(self, data):
+        """Process kline websocket data into a standardized format"""
+        k = data["k"]
+        return {
+            "open_time": k["t"],
+            "open": float(k["o"]),
+            "high": float(k["h"]),
+            "low": float(k["l"]),
+            "close": float(k["c"]),
+            "volume": float(k["v"]),
+            "close_time": k["T"],
+            "is_closed": k["x"],  # True if candle is closed/completed
+            "symbol": data["s"],
+        }
+
+    def _process_ticker_data(self, data):
+        """Process bookTicker websocket data into a standardized format"""
+        return {
+            "symbol": data["s"],
+            "bid_price": float(data["b"]),
+            "bid_qty": float(data["B"]),
+            "ask_price": float(data["a"]),
+            "ask_qty": float(data["A"]),
+            "timestamp": int(time.time() * 1000),
+        }
+
+    def _on_error(self, ws, error):
+        self.logger.error(f"WebSocket error: {error}")
+        if self.should_reconnect:
+            self._schedule_reconnect()
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        self.logger.info(f"WebSocket connection closed: {close_msg}")
+        self.is_connected = False
+        if self.should_reconnect:
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self):
+        """Schedule a reconnection attempt with exponential backoff"""
+        if self.reconnect_count < self.max_reconnects:
+            delay = self.reconnect_delay * (2**self.reconnect_count)
+            self.logger.info(f"Scheduling reconnection in {delay} seconds")
+            threading.Timer(delay, self.start).start()
+            self.reconnect_count += 1
+        else:
+            self.logger.error("Max reconnection attempts reached. Giving up.")
+            self.should_reconnect = False
+
+    def _on_open(self, ws):
+        self.logger.info(f"WebSocket connection opened for {self.symbol}")
+        self.is_connected = True
+        self.reconnect_count = 0  # Reset reconnect counter on successful connection
+
+        # Subscribe to multiple streams
+        subscribe_msg = {
+            "method": "SUBSCRIBE",
+            "params": [
+                f"{self.symbol}@kline_1m",  # 1-minute candles
+                f"{self.symbol}@kline_5m",  # 5-minute candles
+                f"{self.symbol}@kline_15m",  # 15-minute candles
+                f"{self.symbol}@bookTicker",  # Best bid/ask
+            ],
+            "id": 1,
+        }
+        ws.send(json.dumps(subscribe_msg))
+
+    def _process_queue(self):
+        while self.is_connected:
+            try:
+                if not self.data_queue.empty():
+                    data = self.data_queue.get(timeout=1)
+                    self.callback(data)
+                else:
+                    time.sleep(0.01)
+
+                # Send ping every 3 minutes to keep connection alive
+                if time.time() - self.last_ping_time > 180:
+                    ping_msg = {"method": "PING", "id": int(time.time())}
+                    self.ws.send(json.dumps(ping_msg))
+                    self.last_ping_time = time.time()
+                    self.logger.debug("Sent ping to server")
+
+            except Exception as e:
+                self.logger.error(f"Error processing WebSocket data: {e}")
+
+    def start(self):
+        if self.is_connected:
+            return
+
+        websocket.enableTrace(False)  # Set to True for debugging
+        self.ws = websocket.WebSocketApp(
+            self.ws_base_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close,
+        )
+
+        # WebSocket thread
+        self.ws_thread = threading.Thread(target=self.ws.run_forever)
+        self.ws_thread.daemon = True
+        self.ws_thread.start()
+
+        # Data processing thread
+        self.process_thread = threading.Thread(target=self._process_queue)
+        self.process_thread.daemon = True
+        self.process_thread.start()
+
+        # Wait for connection to establish
+        timeout = 0
+        while not self.is_connected and timeout < 10:
+            time.sleep(0.5)
+            timeout += 0.5
+
+        if not self.is_connected:
+            raise ConnectionError("Could not establish WebSocket connection")
+        else:
+            self.logger.info(f"Successfully connected to WebSocket for {self.symbol}")
+
+    def stop(self):
+        self.should_reconnect = False  # Prevent automatic reconnection
+        if self.ws:
+            # Send unsubscribe message
+            unsubscribe_msg = {
+                "method": "UNSUBSCRIBE",
+                "params": [
+                    f"{self.symbol}@kline_1m",
+                    f"{self.symbol}@kline_5m",
+                    f"{self.symbol}@kline_15m",
+                    f"{self.symbol}@bookTicker",
+                ],
+                "id": 2,
+            }
+            try:
+                self.ws.send(json.dumps(unsubscribe_msg))
+                time.sleep(0.5)  # Give time for unsubscribe to process
+            except:
+                pass  # Ignore errors during shutdown
+            self.ws.close()
+        self.is_connected = False
+        self.logger.info(f"WebSocket connection for {self.symbol} closed")
 
 
 class BinanceExchange:
@@ -703,6 +890,28 @@ class BinanceExchange:
         except Exception as e:
             self.logger.error(f"Error setting leverage: {e}")
             return False
+
+    def initialize_websocket(self, symbol, callback):
+        """
+        Belirli bir sembol için WebSocket bağlantısı başlatır
+
+        Parameters
+        ----------
+        symbol : str
+            İzlenecek sembol (örn. 'btcusdt')
+        callback : callable
+            WebSocket verisi alındığında çağrılacak fonksiyon
+        """
+        self.ws_manager = BinanceWebSocketManager(
+            symbol=symbol, callback=callback, use_testnet=self.use_testnet
+        )
+        self.ws_manager.start()
+        return self.ws_manager
+
+    def close_websocket(self):
+        """WebSocket bağlantısını kapatır"""
+        if hasattr(self, "ws_manager"):
+            self.ws_manager.stop()
 
 
 class ExchangeInterface:

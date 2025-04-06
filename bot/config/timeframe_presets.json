@@ -1,0 +1,56 @@
+{
+  "crypto_fast": {
+    "description": "Kripto piyasası için hızlı işlemler (yüksek volatilite dönemleri için)",
+    "timeframe": "5m",
+    "trend_timeframe": "30m",
+    "entry_timeframe": "15m",
+    "dc_length_enter": 15,
+    "dc_length_exit": 8,
+    "atr_length": 10
+  },
+  "crypto_standard": {
+    "description": "Kripto piyasası için standart zaman dilimleri",
+    "timeframe": "15m",
+    "trend_timeframe": "1h",
+    "entry_timeframe": "30m",
+    "dc_length_enter": 20,
+    "dc_length_exit": 10,
+    "atr_length": 14
+  },
+  "crypto_swing": {
+    "description": "Kripto swing trade için daha uzun zaman dilimleri",
+    "timeframe": "1h",
+    "trend_timeframe": "4h",
+    "entry_timeframe": "1h",
+    "dc_length_enter": 24,
+    "dc_length_exit": 12,
+    "atr_length": 20
+  },
+  "forex_standard": {
+    "description": "Forex piyasası için standart zaman dilimleri",
+    "timeframe": "30m",
+    "trend_timeframe": "4h",
+    "entry_timeframe": "1h",
+    "dc_length_enter": 20,
+    "dc_length_exit": 10,
+    "atr_length": 14
+  },
+  "stocks_daily": {
+    "description": "Hisse senedi piyasası için günlük zaman dilimleri",
+    "timeframe": "1h",
+    "trend_timeframe": "1d",
+    "entry_timeframe": "4h",
+    "dc_length_enter": 20,
+    "dc_length_exit": 10,
+    "atr_length": 14
+  },
+  "original_turtle": {
+    "description": "Orijinal Turtle Trading stratejisi zaman dilimleri",
+    "timeframe": "1d",
+    "trend_timeframe": "1w",
+    "entry_timeframe": "1d",
+    "dc_length_enter": 20,
+    "dc_length_exit": 10,
+    "atr_length": 20
+  }
+}

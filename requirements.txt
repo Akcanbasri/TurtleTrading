@@ -1,13 +1,30 @@
+# Core dependencies
 python-binance==1.0.16
 pandas==1.5.3
-pandas-ta==0.3.14b0
-python-dotenv==1.0.0
 numpy==1.24.3
-matplotlib==3.7.1
-ccxt==3.0.73
-websocket-client==1.5.1
+python-dotenv==1.0.0
+
+# Technical indicators and analysis
+pandas-ta==0.3.14b0
+ta-lib==0.4.24  # Optional: requires separate installation of TA-Lib C library
+
+# API and network communication
 requests==2.31.0
+websocket-client==1.5.1
 aiohttp==3.8.4
+ccxt==3.0.73
+
+# Data visualization and reporting
+matplotlib==3.7.1
 colorama==0.4.6
 tabulate==0.9.0
-typing-extensions==4.5.0 
+
+# Data processing and analysis
+scikit-learn==1.2.2
+statsmodels==0.13.5
+scipy==1.10.1
+
+# Utilities
+typing-extensions==4.5.0
+tqdm==4.65.0
+joblib==1.2.0 

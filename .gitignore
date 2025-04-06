@@ -22,7 +22,8 @@ wheels/
 
 # Environment
 .env
-.env-*
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -36,12 +37,23 @@ logs/
 log/
 
 # Bot state and data
-config/
+config/*.json
 data/
-*.json
-*.csv
 backtest_results/
 optimization_results/
+!config/.gitkeep
+
+# Trading data
+*.csv
+*.xlsx
+*.xls
+
+# Credentials
+api_keys.txt
+*_key*
+*_secret*
+credentials.txt
+auth/
 
 # IDE
 .idea/
@@ -71,13 +83,6 @@ coverage.xml
 .ipynb_checkpoints
 *.ipynb
 
-# Credentials and sensitive info
-apies.txt
-*_key*
-*_secret*
-credentials.txt
-auth/
-
 # Temporary files
 *.tmp
 *.bak
@@ -88,3 +93,10 @@ tmp/
 # Documentation build
 docs/_build/
 docs/site/
+
+# Specific to TurtleTrading
+*.pickle
+model_cache/
+*.model
+*_history.json
+performance_metrics/

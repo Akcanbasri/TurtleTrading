@@ -52,6 +52,22 @@ def main():
         action="store_true",
         help="Run in demo mode with synthetic data (no API key needed)",
     )
+    parser.add_argument(
+        "--preset",
+        type=str,
+        choices=[
+            "crypto_fast",
+            "crypto_standard",
+            "crypto_swing",
+            "forex_standard",
+            "stocks_daily",
+            "original_turtle",
+        ],
+        help="Use a predefined timeframe preset for trading",
+    )
+    parser.add_argument(
+        "--clear-cache", action="store_true", help="Clear data cache before starting"
+    )
     args = parser.parse_args()
 
     logger.info("Initializing Turtle Trading Bot")
@@ -72,16 +88,26 @@ def main():
             api_key = "demo_key"
             api_secret = "demo_secret"
             bot = TurtleTradingBot(
-                use_testnet=True, api_key=api_key, api_secret=api_secret, demo_mode=True
+                use_testnet=True,
+                api_key=api_key,
+                api_secret=api_secret,
+                demo_mode=True,
+                timeframe_preset=args.preset,
             )
         else:
             # Normal mode - use API keys from environment variables
-            bot = TurtleTradingBot(use_testnet=use_testnet)
+            bot = TurtleTradingBot(
+                use_testnet=use_testnet, timeframe_preset=args.preset
+            )
 
         if args.backtest:
             logger.info(f"Running backtest for the last {args.days} days")
             bot.run_backtest(days=args.days)
             return
+
+        if args.clear_cache:
+            bot.data_manager.clear_cache()
+            logger.info("Data cache cleared")
 
         # Main bot loop
         while True:

@@ -13,6 +13,7 @@ import logging
 import os
 import json
 from pathlib import Path
+import math
 
 from bot.exchange import BinanceExchange
 from bot.indicators import (
@@ -20,6 +21,9 @@ from bot.indicators import (
     calculate_stop_loss_take_profit,
     check_exit_signal,
     check_stop_loss,
+    calculate_indicators_incremental,
+    check_two_way_price_action,
+    calculate_ma,
 )
 from bot.models import BotConfig, PositionState
 from bot.risk import calculate_pnl, calculate_position_size
@@ -29,6 +33,7 @@ from bot.utils import (
     load_position_state,
     save_position_state,
     setup_logging,
+    format_quantity,
 )
 
 
@@ -39,6 +44,7 @@ class DataManager:
         """Initialize the data manager."""
         self.exchange = exchange
         self.data_cache = {}
+        self.cache_access_times = {}  # Track when each cache entry was last accessed
 
     def get_historical_data(self, symbol, timeframe, limit=100):
         """Get historical candlestick data for a symbol and timeframe."""
@@ -46,6 +52,8 @@ class DataManager:
 
         # Check cache first
         if cache_key in self.data_cache:
+            # Update access time
+            self.cache_access_times[cache_key] = time.time()
             return self.data_cache[cache_key]
 
         # Fetch from exchange
@@ -139,14 +147,166 @@ class DataManager:
                 f"Successfully generated {limit} synthetic candles for {symbol}"
             )
 
-        # Cache the result
+        # Cache the result and update access time
         self.data_cache[cache_key] = data
+        self.cache_access_times[cache_key] = time.time()
+
+        # Clean up old cache entries if cache is getting too large
+        self.clear_old_cache_entries()
+
+        # Veriyi döndürmeden önce gerekli sütunların varlığını kontrol edin
+        required_columns = ["open", "high", "low", "close", "volume"]
+        for col in required_columns:
+            if col not in data.columns:
+                logger = logging.getLogger("turtle_trading_bot")
+                logger.error(f"Eksik veri sütunu: {col}")
+                # Eksik sütunu uygun değerlerle doldurun veya hata fırlatın
 
         return data
 
     def clear_cache(self):
         """Clear the data cache."""
         self.data_cache = {}
+        self.cache_access_times = {}
+
+    def clear_old_cache_entries(self, max_cache_size=100, max_age_hours=24):
+        """
+        Clear old cache entries to prevent memory issues on long runs
+
+        Parameters
+        ----------
+        max_cache_size : int
+            Maximum number of entries to keep in cache
+        max_age_hours : int
+            Maximum age of cache entries in hours
+        """
+        # If cache is smaller than max size, only remove by age
+        if len(self.data_cache) <= max_cache_size:
+            current_time = time.time()
+            max_age_seconds = max_age_hours * 3600
+
+            # Remove entries older than max age
+            expired_keys = [
+                key
+                for key, access_time in self.cache_access_times.items()
+                if current_time - access_time > max_age_seconds
+            ]
+
+            for key in expired_keys:
+                if key in self.data_cache:
+                    del self.data_cache[key]
+                if key in self.cache_access_times:
+                    del self.cache_access_times[key]
+        else:
+            # If cache is larger than max size, keep most recently accessed entries
+            sorted_keys = sorted(
+                self.cache_access_times.keys(),
+                key=lambda k: self.cache_access_times[k],
+                reverse=True,
+            )
+
+            # Keep only max_cache_size most recent entries
+            keys_to_remove = sorted_keys[max_cache_size:]
+
+            for key in keys_to_remove:
+                if key in self.data_cache:
+                    del self.data_cache[key]
+                if key in self.cache_access_times:
+                    del self.cache_access_times[key]
+
+    def initialize_real_time_data(self, symbol, timeframe):
+        """
+        Gerçek zamanlı veri akışı için WebSocket başlatır
+
+        Parameters
+        ----------
+        symbol : str
+            İzlenecek sembol
+        timeframe : str
+            Zaman dilimi
+        """
+        self.real_time_data = {}
+        self.current_candle = None
+
+        def websocket_callback(data):
+            # Kline verisi geldiğinde
+            if "k" in data:
+                k = data["k"]
+                if k["x"]:  # Mum tamamlandıysa
+                    # Yeni mumu dataframe'e ekle
+                    new_candle = {
+                        "open_time": k["t"] // 1000,  # milisaniyeden saniyeye çevir
+                        "open": float(k["o"]),
+                        "high": float(k["h"]),
+                        "low": float(k["l"]),
+                        "close": float(k["c"]),
+                        "volume": float(k["v"]),
+                        "close_time": k["T"] // 1000,
+                    }
+                    # Mum verisini sakla
+                    self.real_time_data[timeframe] = new_candle
+
+                    # Geçerli DataFrame'e yeni veriyi ekle ve önbelleği güncelle
+                    self._update_dataframe_with_new_candle(
+                        symbol, timeframe, new_candle
+                    )
+                else:
+                    # Devam eden mumu sakla
+                    self.current_candle = {
+                        "open_time": k["t"] // 1000,
+                        "open": float(k["o"]),
+                        "high": float(k["h"]),
+                        "low": float(k["l"]),
+                        "close": float(k["c"]),
+                        "volume": float(k["v"]),
+                        "close_time": k["T"] // 1000,
+                    }
+
+            # Ticker verisi geldiğinde
+            elif "lastPrice" in data:
+                self.last_price = float(data["lastPrice"])
+
+        # WebSocket başlat
+        self.ws_manager = self.exchange.initialize_websocket(
+            symbol.lower(), websocket_callback
+        )
+
+    def _update_dataframe_with_new_candle(self, symbol, timeframe, candle_data):
+        """Yeni bir mum verisini DataFrame'e ekler ve göstergeleri inkremental olarak günceller"""
+        cache_key = f"{symbol}_{timeframe}"
+
+        # Yeni satır oluştur
+        new_row = {
+            "timestamp": candle_data["open_time"],
+            "open": candle_data["open"],
+            "high": candle_data["high"],
+            "low": candle_data["low"],
+            "close": candle_data["close"],
+            "volume": candle_data["volume"],
+        }
+
+        if cache_key in self.data_cache:
+            df = self.data_cache[cache_key].copy()
+
+            # Göstergeleri inkremental olarak güncelle
+            # Bot yapılandırmasını al (bu örnek için sabit değerler)
+            dc_enter = 20
+            dc_exit = 10
+            atr_len = 14
+
+            # Göstergeleri inkremental olarak hesapla
+            updated_df = calculate_indicators_incremental(
+                df, new_row, dc_enter, dc_exit, atr_len
+            )
+
+            # Önbelleği güncelle
+            self.data_cache[cache_key] = updated_df
+            self.cache_timestamps[cache_key] = time.time()
+        else:
+            # Önbellekte yoksa, normal hesaplama yap
+            new_df = pd.DataFrame([new_row])
+            self.data_cache[cache_key] = new_df
+            self.cache_timestamps[cache_key] = time.time()
 
 
 class TurtleTradingBot:
@@ -165,6 +325,7 @@ class TurtleTradingBot:
         api_key=None,
         api_secret=None,
         demo_mode=False,
+        timeframe_preset=None,
     ):
         """
         Initialize the bot.
@@ -175,6 +336,7 @@ class TurtleTradingBot:
             api_key: Optional API key (overrides config file)
             api_secret: Optional API secret (overrides config file)
             demo_mode: Whether to run in demo mode with synthetic data
+            timeframe_preset: Optional timeframe preset to load (e.g., 'crypto_standard')
         """
         # Setup logging
         self.logger = logging.getLogger("turtle_trading_bot")
@@ -202,6 +364,17 @@ class TurtleTradingBot:
         if api_key is not None and api_secret is not None:
             self.config.api_key = api_key
             self.config.api_secret = api_secret
+
+        # Load timeframe preset if specified
+        if timeframe_preset:
+            if self.config.load_timeframe_preset(timeframe_preset):
+                # Update local variables with new values from preset
+                self.timeframe = self.config.timeframe
+                self.logger.info(f"Using timeframe preset: {timeframe_preset}")
+            else:
+                self.logger.warning(
+                    f"Failed to load timeframe preset: {timeframe_preset}"
+                )
 
         # Initialize exchange interface
         self.exchange = BinanceExchange(
@@ -251,6 +424,9 @@ class TurtleTradingBot:
 
         # Log bot initialization
         self._log_initialization()
+
+        # __init__ metoduna eklenecek
+        self.use_websocket = True  # WebSocket kullanımını etkinleştir
 
     def _load_position_state(self) -> PositionState:
         """
@@ -467,7 +643,7 @@ class TurtleTradingBot:
                 f"Entry: {format_price(self.position.entry_price, self.symbol_info.price_precision)}, Exit: {format_price(exit_price, self.symbol_info.price_precision)}"
             )
             self.logger.info(
-                f"P&L: {format_price(pnl, self.symbol_info.price_precision)} {self.config.quote_asset} ({pnl_percent:.2f}%)"
+                f"P&L: {format_price(pnl, self.symbol_info.price_precision)} {self.quote_asset} ({pnl_percent:.2f}%)"
             )
 
             self.position.reset()
@@ -484,182 +660,183 @@ class TurtleTradingBot:
         current_price: Union[float, Decimal],
         atr_value: Union[float, Decimal],
         pyramid_level: int = 0,
+        atr_average: Union[float, Decimal] = None,
     ) -> bool:
         """
-        Execute a position entry with dynamic leverage based on account balance
+        Execute trade entry
 
-        Parameters
-        ----------
-        direction : str
-            Trade direction ('long' or 'short')
-        current_price : Union[float, Decimal]
-            Current market price
-        atr_value : Union[float, Decimal]
-            Current ATR value
-        pyramid_level : int
-            Pyramid level (0 for first entry, 1+ for additional entries)
+        Args:
+            direction: Trade direction ('long' or 'short')
+            current_price: Current market price
+            atr_value: Current ATR value
+            pyramid_level: Pyramid level (0 = first entry)
+            atr_average: Average ATR over longer period for volatility-based risk adjustment
 
-        Returns
-        -------
-        bool
-            Whether the entry was successful
+        Returns:
+            bool: Whether the entry was executed successfully
         """
-        try:
-            # Convert to proper types
-            current_price_dec = (
-                Decimal(str(current_price))
-                if not isinstance(current_price, Decimal)
-                else current_price
-            )
+        # Normalize direction
+        direction = (
+            direction.upper() if direction.lower() in ["buy", "long"] else "SELL"
+        )
 
-            # Get available balance
-            available_balance = self.exchange.get_account_balance(self.quote_asset)
-            if available_balance is None or available_balance <= Decimal("0"):
-                self.logger.error(f"Invalid available balance: {available_balance}")
+        # Standardize direction to match Binance API
+        side = "BUY" if direction.upper() in ["BUY", "LONG"] else "SELL"
+
+        # Log entry plan
+        self.logger.info(f"Planning {side} entry for {self.symbol} at {current_price}")
+
+        # Don't enter if the price is NaN or zero
+        if current_price == 0 or (
+            isinstance(current_price, float) and math.isnan(current_price)
+        ):
+            self.logger.error("Invalid price (0 or NaN). Cannot execute entry.")
+            return False
+
+        try:
+            # Get account balance for the quote asset
+            balance = self.exchange.get_account_balance(self.config.quote_asset)
+            if balance is None or balance == 0:
+                self.logger.error(
+                    f"No {self.config.quote_asset} balance available. Cannot execute entry."
+                )
                 return False
 
-            self.logger.info(
-                f"Available balance: {available_balance} {self.quote_asset}"
+            self.logger.info(f"Available balance: {balance} {self.config.quote_asset}")
+
+            # Build symbol info dictionary for position sizing
+            symbol_info = {
+                "min_qty": self.symbol_info.min_qty,
+                "step_size": self.symbol_info.step_size,
+                "min_notional": self.symbol_info.min_notional,
+                "price_precision": self.symbol_info.price_precision,
+                "quantity_precision": self.symbol_info.quantity_precision,
+            }
+
+            # Check if entry is aligned with higher timeframe trend
+            is_trend_aligned = (
+                direction == "BUY"
+                and self.last_analysis.get("trend_direction") == "long"
+            ) or (
+                direction == "SELL"
+                and self.last_analysis.get("trend_direction") == "short"
             )
 
-            # Map direction to order side
-            order_side = "BUY" if direction == "long" else "SELL"
-
-            # Determine if trade is aligned with trend
-            is_trend_aligned = True
-            if hasattr(self, "last_analysis") and self.last_analysis:
-                is_trend_aligned = self.last_analysis.get("trend_aligned", True)
-
-            # Calculate minimum position size based on account balance
-            min_position_value = Decimal("5")  # Minimum position size in USDT
-
-            # Set dynamic leverage based on account balance
-            # Lower leverage for smaller accounts to limit risk
-            target_leverage = 1  # Default leverage
-
-            if available_balance <= Decimal("20"):
-                # For accounts with less than 20 USDT, max leverage is 5x
-                target_leverage = min(5, int(self.config.leverage))
-                self.logger.info(
-                    f"Small account detected (<20 USDT), limiting leverage to 5x"
-                )
-            elif available_balance <= Decimal("50"):
-                # For accounts with less than 50 USDT, max leverage is 7x
-                target_leverage = min(7, int(self.config.leverage))
-                self.logger.info(
-                    f"Medium account detected (<50 USDT), limiting leverage to 7x"
-                )
-            elif available_balance <= Decimal("100"):
-                # For accounts with less than 100 USDT, max leverage is 10x
-                target_leverage = min(10, int(self.config.leverage))
-                self.logger.info(
-                    f"Standard account detected (<100 USDT), limiting leverage to 10x"
-                )
-            else:
-                # For larger accounts, use the configured leverage
-                target_leverage = int(self.config.leverage)
-                self.logger.info(
-                    f"Large account detected (>100 USDT), using configured leverage {target_leverage}x"
-                )
-
-            # For trend trades, we can use higher leverage
+            # Determine leverage based on trend alignment
             if is_trend_aligned:
-                actual_leverage = min(
-                    target_leverage, int(self.config.max_leverage_trend)
+                leverage = min(
+                    int(self.config.leverage), int(self.config.max_leverage_trend)
+                )
+                self.logger.info(
+                    f"Trend-aligned trade, using up to {leverage}x leverage"
                 )
             else:
-                # For counter-trend trades, we use lower leverage
-                actual_leverage = min(
-                    target_leverage, int(self.config.max_leverage_counter)
+                leverage = min(
+                    int(self.config.leverage), int(self.config.max_leverage_counter)
+                )
+                self.logger.info(
+                    f"Counter-trend trade, limiting to {leverage}x leverage"
                 )
 
             # Set leverage on exchange
-            self.logger.info(
-                f"Setting leverage to {actual_leverage}x for {self.symbol}"
-            )
-            leverage_set = self.exchange.set_leverage(self.symbol, actual_leverage)
+            if leverage > 1:
+                try:
+                    self.logger.info(
+                        f"Setting leverage to {leverage}x for {self.symbol}"
+                    )
+                    self.exchange.set_leverage(self.symbol, leverage)
+                except Exception as e:
+                    self.logger.warning(f"Failed to set leverage: {e}. Using 1x.")
+                    leverage = 1
 
-            if not leverage_set:
-                self.logger.warning(
-                    f"Failed to set leverage. Using default leverage from exchange."
-                )
+            # Calculate position size using risk management rules
+            from bot.risk import calculate_position_size
 
-            # Calculate position size based on risk management
+            risk_percent = Decimal(str(self.config.risk_per_trade))
+            max_risk_percentage = Decimal(str(self.config.max_risk_percentage))
+
+            # Pass average ATR for volatility-based risk adjustment
             position_size, status = calculate_position_size(
-                available_balance=available_balance,
-                risk_percent=Decimal(str(self.config.risk_per_trade)),
+                available_balance=balance,
+                risk_percent=risk_percent,
                 atr_value=atr_value,
-                current_price=current_price_dec,
-                symbol_info=self.symbol_info.__dict__,
-                max_risk_percentage=Decimal(str(self.config.max_risk_percentage)),
-                leverage=actual_leverage,
-                position_side=order_side,
+                current_price=Decimal(str(current_price)),
+                symbol_info=symbol_info,
+                max_risk_percentage=max_risk_percentage,
+                leverage=leverage,
+                position_side=side,
                 pyramid_level=pyramid_level,
                 pyramid_size_first=Decimal(str(self.config.pyramid_size_first)),
                 pyramid_size_additional=Decimal(
                     str(self.config.pyramid_size_additional)
                 ),
                 is_trend_aligned=is_trend_aligned,
+                atr_average=atr_average,  # Pass for volatility adjustment
             )
 
-            if status != "success" or position_size <= Decimal("0"):
+            if status != "success" or position_size <= 0:
                 self.logger.error(f"Position sizing failed: {status}")
                 return False
 
-            # Check if position value meets minimum requirements
-            position_value = position_size * current_price_dec
-            if position_value < min_position_value:
-                self.logger.warning(
-                    f"Position value {position_value} is below minimum {min_position_value}. "
-                    f"Consider increasing risk percentage or account size."
-                )
-                # Try to adjust position size to meet minimum value
-                adjusted_size = min_position_value / current_price_dec
-                if (
-                    adjusted_size > Decimal("0")
-                    and adjusted_size
-                    * current_price_dec
-                    / Decimal(str(actual_leverage))
-                    <= available_balance
-                ):
-                    position_size = adjusted_size
-                    self.logger.info(
-                        f"Adjusted position size to meet minimum value: {position_size}"
-                    )
-                else:
-                    self.logger.error(
-                        f"Cannot meet minimum position size with current balance"
-                    )
-                    return False
+            # Format quantity for the order
+            quantity_str = format_quantity(
+                position_size, self.symbol_info.quantity_precision
+            )
+            self.logger.info(f"Calculated position size: {quantity_str}")
 
             # Execute the order
             self.logger.info(
-                f"Executing {order_side} order for {position_size} {self.base_asset} at ~{format_price(current_price_dec, self.symbol_info.price_precision)}"
+                f"Executing {side} order for {quantity_str} {self.symbol} at market price"
             )
 
-            success, order_result = self.exchange.execute_order(
-                symbol=self.symbol,
-                side=order_side,
-                quantity=position_size,
-                order_type="MARKET",
-            )
+            try:
+                # Will be implemented in exchange.py
+                order_result = self.exchange.execute_market_order(
+                    symbol=self.symbol,
+                    side=side,
+                    quantity=position_size,
+                )
 
-            if not success:
-                self.logger.error(f"Order execution failed: {order_result}")
+                if not order_result:
+                    self.logger.error("Order execution failed")
+                    return False
+
+                self.logger.info(f"Order executed successfully: {order_result}")
+
+                # Calculate stop loss and take profit levels
+                from bot.indicators import calculate_stop_loss_take_profit
+
+                stop_loss, take_profit = calculate_stop_loss_take_profit(
+                    entry_price=float(current_price),
+                    atr_value=float(atr_value),
+                    atr_multiple=float(self.config.stop_loss_atr_multiple),
+                    position_side=side,
+                )
+
+                # Update position state
+                self.update_position_state(order_result, side, float(atr_value))
+                self.position.stop_loss_price = Decimal(str(stop_loss))
+                self.position.take_profit_price = Decimal(str(take_profit))
+                self.position.entry_count = pyramid_level + 1
+                self.position.current_entry_level = pyramid_level
+
+                # Save state
+                self.save_state()
+
+                self.logger.info(
+                    f"Entry successful: {side} {quantity_str} {self.symbol} at {current_price}"
+                )
+                self.logger.info(
+                    f"Stop loss set at {stop_loss} | Take profit at {take_profit}"
+                )
+                return True
+
+            except Exception as e:
+                self.logger.error(f"Error executing order: {e}")
                 return False
 
-            # Update position state
-            self.update_position_state(order_result, order_side, float(atr_value))
-
-            # Update position entry count and time for pyramiding
-            self.position.entry_count += 1
-            self.position.last_entry_time = time.time()
-
-            return True
-
         except Exception as e:
-            self.logger.error(f"Error executing entry: {e}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Error in _execute_entry: {e}")
             return False
 
     def manage_exit_strategy(self) -> bool:
@@ -881,8 +1058,6 @@ class TurtleTradingBot:
                 return False
 
             # Round to the correct precision
-            from bot.utils import format_quantity
-
             exit_quantity = Decimal(
                 format_quantity(exit_quantity, self.symbol_info.quantity_precision)
             )
@@ -1177,6 +1352,13 @@ class TurtleTradingBot:
             self.logger.info("          TURTLE TRADING BOT STOPPED         ")
             self.logger.info("==============================================")
 
+        # run metoduna eklenecek (self.run() fonksiyonu içinde)
+        if self.use_websocket:
+            self.data_manager.initialize_real_time_data(
+                self.config.symbol, self.config.timeframe
+            )
+            self.logger.info(f"WebSocket initialized for {self.config.symbol}")
+
     def run_trading_cycle(self):
         """Run a complete trading cycle."""
         self.logger.info(f"Running trading cycle for {self.symbol}")
@@ -1316,9 +1498,21 @@ class TurtleTradingBot:
                 symbol, self.config.entry_timeframe, limit=100
             )
 
-            # Calculate indicators for both timeframes
-            from bot.indicators import calculate_indicators, check_entry_signal
-            from bot.indicators import check_adx_filter, check_ma_filter
+            # Get historical data for execution timeframe (lowest timeframe)
+            execution_df = self.data_manager.get_historical_data(
+                symbol, self.config.timeframe, limit=100
+            )
+
+            # Calculate indicators for all timeframes
+            from bot.indicators import (
+                calculate_indicators,
+                check_entry_signal,
+                check_adx_filter,
+                check_ma_filter,
+                check_bb_squeeze,
+                check_rsi_conditions,
+                check_macd_confirmation,
+            )
 
             # Make sure the DataFrames have the required columns
             if trend_df is None or trend_df.empty:
@@ -1329,7 +1523,24 @@ class TurtleTradingBot:
                 self.logger.warning(f"No entry data available for {symbol}")
                 entry_df = self._create_default_dataframe()
 
-            # Calculate indicators with proper parameters
+            if execution_df is None or execution_df.empty:
+                self.logger.warning(f"No execution data available for {symbol}")
+                execution_df = self._create_default_dataframe()
+
+            # Ensure 'ma' column exists in trend_df before using it
+            if "ma" not in trend_df.columns:
+                trend_df["ma"] = trend_df["close"].rolling(self.config.ma_period).mean()
+
+            # Determine trend direction from higher timeframe
+            if trend_df["close"].iloc[-1] > trend_df["ma"].iloc[-1]:
+                trend_direction = "long"
+            elif trend_df["close"].iloc[-1] < trend_df["ma"].iloc[-1]:
+                trend_direction = "short"
+            else:
+                trend_direction = "neutral"
+
+            # Calculate indicators with proper parameters for both long and short
+            # For short positions, we want to use a slightly modified set of parameters
             trend_df = calculate_indicators(
                 df=trend_df,
                 dc_enter=self.config.dc_length_enter,
@@ -1338,6 +1549,10 @@ class TurtleTradingBot:
                 atr_smooth=self.config.atr_smoothing,
                 ma_period=self.config.ma_period,
                 adx_period=self.config.adx_period,
+                include_additional=True,  # Include BB and RSI
+                position_side=(
+                    "SELL" if trend_direction == "short" else "BUY"
+                ),  # Optimize for trend direction
             )
 
             entry_df = calculate_indicators(
@@ -1348,32 +1563,60 @@ class TurtleTradingBot:
                 atr_smooth=self.config.atr_smoothing,
                 ma_period=self.config.ma_period,
                 adx_period=self.config.adx_period,
+                include_additional=True,  # Include BB and RSI
+                position_side=(
+                    "SELL" if trend_direction == "short" else "BUY"
+                ),  # Optimize for trend direction
             )
 
-            # Ensure 'ma' column exists
-            if "ma" not in trend_df.columns:
-                trend_df["ma"] = trend_df["close"].rolling(self.config.ma_period).mean()
+            execution_df = calculate_indicators(
+                df=execution_df,
+                dc_enter=self.config.dc_length_enter,
+                dc_exit=self.config.dc_length_exit,
+                atr_len=self.config.atr_length,
+                atr_smooth=self.config.atr_smoothing,
+                ma_period=self.config.ma_period,
+                adx_period=self.config.adx_period,
+                include_additional=True,  # Include BB and RSI
+                position_side=(
+                    "SELL" if trend_direction == "short" else "BUY"
+                ),  # Optimize for trend direction
+            )
 
             # Ensure 'adx' column exists
             if "adx" not in trend_df.columns:
                 trend_df["adx"] = 25.0  # Default ADX value
 
-            # Determine trend direction from higher timeframe
-            if trend_df["close"].iloc[-1] > trend_df["ma"].iloc[-1]:
-                trend_direction = "long"
-            elif trend_df["close"].iloc[-1] < trend_df["ma"].iloc[-1]:
-                trend_direction = "short"
+            # Calculate average ATR for volatility analysis (over 30 periods)
+            atr_avg_period = 30
+            if len(entry_df) >= atr_avg_period and "atr" in entry_df.columns:
+                atr_average = (
+                    entry_df["atr"].rolling(window=atr_avg_period).mean().iloc[-1]
+                )
             else:
-                trend_direction = "neutral"
+                atr_average = (
+                    entry_df["atr"].mean() if "atr" in entry_df.columns else 0.0
+                )
 
             # Check entry signals on entry timeframe
             try:
-                entry_long = check_entry_signal(entry_df.iloc[-1], "long")
-                entry_short = check_entry_signal(entry_df.iloc[-1], "short")
+                entry_long = check_entry_signal(entry_df.iloc[-1], "BUY")
+                entry_short = check_entry_signal(entry_df.iloc[-1], "SELL")
             except Exception as e:
                 self.logger.error(f"Error checking entry signals: {e}")
                 entry_long = False
                 entry_short = False
+
+            # Check for Bollinger Band squeeze (low volatility, potential breakout)
+            try:
+                bb_squeeze_detected = check_bb_squeeze(entry_df.iloc[-1])
+                if bb_squeeze_detected:
+                    self.logger.info(
+                        "Bollinger Band squeeze detected - potential breakout setup"
+                    )
+            except Exception as e:
+                self.logger.error(f"Error checking BB squeeze: {e}")
+                bb_squeeze_detected = False
 
             # Check if entry aligns with trend
             entry_signal = False
@@ -1382,20 +1625,78 @@ class TurtleTradingBot:
             if entry_long and (
                 trend_direction == "long" or not self.config.trend_alignment_required
             ):
-                entry_signal = True
-                signal_direction = "long"
+                # Confirm with RSI for long entries
+                rsi_confirms = check_rsi_conditions(entry_df.iloc[-1], "BUY")
+                # Also confirm with MACD for long entries
+                macd_confirms = check_macd_confirmation(entry_df.iloc[-1], "BUY")
+
+                if rsi_confirms and macd_confirms:
+                    entry_signal = True
+                    signal_direction = "long"
+                else:
+                    self.logger.info(
+                        "Long entry signal rejected by filter: "
+                        + ("RSI failed" if not rsi_confirms else "")
+                        + ("MACD failed" if not macd_confirms else "")
+                    )
             elif entry_short and (
                 trend_direction == "short" or not self.config.trend_alignment_required
             ):
-                entry_signal = True
-                signal_direction = "short"
+                # For short entries, we need stronger confirmation
+
+                # 1. First, check if ADX is high enough for a strong trend
+                adx_value = trend_df["adx"].iloc[-1]
+                adx_strong = adx_value >= 30  # Require stronger trend for shorts
+
+                # 2. Check if price is below MA by a significant margin (1.5% lower)
+                price_below_ma = (
+                    entry_df["close"].iloc[-1] < entry_df["ma"].iloc[-1] * 0.985
+                )
+
+                # 3. Check RSI conditions for short entries
+                rsi_confirms = check_rsi_conditions(entry_df.iloc[-1], "SELL")
+
+                # 4. Check MACD confirmation for short entries
+                macd_confirms = check_macd_confirmation(entry_df.iloc[-1], "SELL")
+
+                # 5. For shorts, verify the downtrend on multiple timeframes
+                downtrend_confirmed = (
+                    trend_df["close"].iloc[-1] < trend_df["ma"].iloc[-1]
+                    and entry_df["close"].iloc[-1] < entry_df["ma"].iloc[-1]
+                    and trend_df["macd"].iloc[-1] < trend_df["macd_signal"].iloc[-1]
+                )
+
+                # Combine all confirmations for short entry
+                if (
+                    rsi_confirms
+                    and macd_confirms
+                    and adx_strong
+                    and price_below_ma
+                    and downtrend_confirmed
+                ):
+                    entry_signal = True
+                    signal_direction = "short"
+                    self.logger.info(
+                        "Short entry confirmed with multiple confirmations"
+                    )
+                else:
+                    self.logger.info(
+                        f"Short entry rejected. ADX: {adx_value:.1f} (strong: {adx_strong}), "
+                        f"Price/MA: {price_below_ma}, RSI: {rsi_confirms}, "
+                        f"MACD: {macd_confirms}, Downtrend: {downtrend_confirmed}"
+                    )
 
             # Check ADX for trend strength
             try:
                 adx_value = trend_df["adx"].iloc[-1]
-                adx_passed = check_adx_filter(
-                    trend_df.iloc[-1], self.config.adx_threshold
-                )
+                # Different ADX thresholds for long and short
+                adx_threshold = self.config.adx_threshold
+                if signal_direction == "short":
+                    adx_threshold = max(
+                        30, self.config.adx_threshold
+                    )  # Higher threshold for shorts
+
+                adx_passed = check_adx_filter(trend_df.iloc[-1], adx_threshold)
             except Exception as e:
                 self.logger.error(f"Error checking ADX: {e}")
                 adx_value = 0.0
@@ -1409,6 +1710,21 @@ class TurtleTradingBot:
                 except Exception as e:
                     self.logger.error(f"Error checking MA filter: {e}")
 
+            # Get entry price and ATR from execution timeframe
+            entry_price = execution_df["close"].iloc[-1]
+            entry_atr = (
+                execution_df["atr"].iloc[-1] if "atr" in execution_df.columns else 0.0
+            )
+
+            # İki yönlü fiyat hareketi kontrolü
+            two_way_price_action = check_two_way_price_action(entry_df, lookback=5)
+            if two_way_price_action:
+                self.logger.info(
+                    "İki yönlü fiyat hareketi tespit edildi - sinyal filtreleniyor"
+                )
+                entry_signal = False
+                signal_direction = "none"
+
             return {
                 "trend_direction": trend_direction,
                 "entry_signal": entry_signal,
@@ -1416,8 +1732,21 @@ class TurtleTradingBot:
                 "adx_value": adx_value,
                 "adx_filter_passed": adx_passed,
                 "ma_filter_passed": ma_passed,
-                "current_price": entry_df["close"].iloc[-1],
-                "atr": entry_df["atr"].iloc[-1] if "atr" in entry_df.columns else 0.0,
+                "current_price": entry_price,
+                "atr": entry_atr,
+                "atr_average": atr_average,
+                "bb_squeeze": bb_squeeze_detected,
+                "rsi_value": (
+                    entry_df["rsi"].iloc[-1] if "rsi" in entry_df.columns else 50.0
+                ),
+                "macd_confirms": (
+                    True
+                    if signal_direction == "none"
+                    else check_macd_confirmation(
+                        entry_df.iloc[-1],
+                        "BUY" if signal_direction == "long" else "SELL",
+                    )
+                ),
             }
         except Exception as e:
             self.logger.error(f"Error during multi-timeframe analysis: {e}")
@@ -1431,6 +1760,10 @@ class TurtleTradingBot:
                 "ma_filter_passed": False,
                 "current_price": 30000.0,  # Default price for BTC
                 "atr": 1000.0,  # Default ATR for BTC
+                "atr_average": 1000.0,
+                "bb_squeeze": False,
+                "rsi_value": 50.0,
+                "macd_confirms": False,
             }
 
     def _create_default_dataframe(self):
@@ -1539,6 +1872,7 @@ class TurtleTradingBot:
             current_price=price,
             atr_value=atr,
             pyramid_level=self.position.entry_count,
+            atr_average=atr_average,
         )
 
     def check_exit_signal(self):
@@ -1666,3 +2000,1020 @@ class TurtleTradingBot:
 
         save_position_state(self.position, self.symbol)
         self.logger.info(f"Bot state saved for {self.symbol}")
+
+    def execute_trade(self, symbol, side, analysis_results):
+        """
+        Execute a trade based on the signal and analysis results.
+
+        Args:
+            symbol: The trading symbol
+            side: Position side ("BUY" or "SELL")
+            analysis_results: Results from multi-timeframe analysis
+        """
+        try:
+            current_price = analysis_results.get("current_price", 0.0)
+            atr = analysis_results.get("atr", 0.0)
+
+            # Skip if price or ATR is zero (error case)
+            if current_price <= 0 or atr <= 0:
+                self.logger.warning(
+                    f"Invalid price ({current_price}) or ATR ({atr}). Skipping trade."
+                )
+                return
+
+            # Get balance and calculate position size with risk management
+            account_balance = self.exchange.get_balance()
+
+            # Base risk percentage on volatility (use higher risk for lower volatility)
+            # For short positions, reduce risk further due to potentially unlimited loss
+            base_risk_percentage = self.config.risk_per_trade
+
+            # Adjust risk based on volatility
+            volatility_adjusted_risk = self.adjust_risk_based_on_volatility(
+                symbol, analysis_results.get("atr_average", atr), base_risk_percentage
+            )
+
+            # Further reduce risk for short positions
+            if side == "SELL":
+                # Reduce risk by 20% for short positions
+                volatility_adjusted_risk *= 0.8
+                self.logger.info(
+                    f"Reduced risk for short position: {volatility_adjusted_risk:.2f}%"
+                )
+
+            # Calculate position size based on risk and ATR
+            risk_amount = account_balance * (volatility_adjusted_risk / 100)
+
+            # Calculate stop loss distance - use ATR multiplier
+            # For shorts, use a slightly wider stop loss
+            sl_multiplier = self.config.sl_atr_multiplier
+            if side == "SELL":
+                sl_multiplier *= 1.2  # 20% wider stop loss for shorts
+
+            stop_loss_distance = atr * sl_multiplier
+
+            # Calculate position size based on risk and stop loss
+            position_size = (
+                risk_amount / stop_loss_distance if stop_loss_distance > 0 else 0
+            )
+
+            # Calculate take profit based on reward/risk ratio
+            # For shorts, use a more conservative target
+            tp_multiplier = self.config.tp_atr_multiplier
+            if side == "SELL":
+                tp_multiplier *= (
+                    0.8  # 20% closer target for shorts to account for faster rebounds
+                )
+
+            take_profit_distance = atr * tp_multiplier
+
+            # Calculate stop loss and take profit levels
+            if side == "BUY":
+                stop_loss = current_price - stop_loss_distance
+                take_profit = current_price + take_profit_distance
+            else:  # SELL
+                stop_loss = current_price + stop_loss_distance
+                take_profit = current_price - take_profit_distance
+
+            # Execute the trade through the exchange
+            trade_result = self.exchange.execute_order(
+                symbol=symbol,
+                side=side,
+                quantity=position_size,
+                price=current_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
+
+            # Log detailed trade information
+            self.logger.info(
+                f"Trade executed: {side} {symbol} at {current_price}. "
+                f"Pos Size: {position_size:.8f}, "
+                f"Stop Loss: {stop_loss:.2f}, "
+                f"Take Profit: {take_profit:.2f}, "
+                f"Risk: {volatility_adjusted_risk:.2f}%, "
+                f"ATR: {atr:.2f}"
+            )
+
+            # Save the trade to database
+            self.save_trade(
+                symbol=symbol,
+                side=side,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                quantity=position_size,
+                risk_percentage=volatility_adjusted_risk,
+            )
+
+            return trade_result
+
+        except Exception as e:
+            self.logger.error(f"Error executing trade: {e}")
+            return None
+
+    def adjust_risk_based_on_volatility(self, symbol, atr_average, base_risk_percent):
+        """
+        Adjust risk percentage based on current market volatility and market conditions.
+        Reduces risk in highly volatile markets and for short positions.
+
+        Args:
+            symbol: Trading symbol
+            atr_average: Average ATR value
+            base_risk_percent: Base risk percentage from configuration
+
+        Returns:
+            float: Adjusted risk percentage
+        """
+        try:
+            # Get current ATR
+            df = self.data_manager.get_historical_data(
+                symbol, self.config.timeframe, limit=30
+            )
+            if df is None or df.empty or "atr" not in df.columns:
+                self.logger.warning(f"Could not get ATR for {symbol}. Using base risk.")
+                return base_risk_percent
+
+            current_atr = df["atr"].iloc[-1]
+
+            # Prevent division by zero
+            if atr_average <= 0:
+                return base_risk_percent
+
+            # Calculate volatility ratio
+            volatility_ratio = current_atr / atr_average
+
+            # Adjust risk based on volatility ratio
+            if volatility_ratio > 1.5:
+                # High volatility - reduce risk
+                adjusted_risk = base_risk_percent * 0.7
+                self.logger.info(
+                    f"High volatility detected (ratio: {volatility_ratio:.2f}). Reducing risk to {adjusted_risk:.2f}%"
+                )
+            elif volatility_ratio < 0.7:
+                # Low volatility - can increase risk slightly
+                adjusted_risk = base_risk_percent * 1.2
+                self.logger.info(
+                    f"Low volatility detected (ratio: {volatility_ratio:.2f}). Increasing risk to {adjusted_risk:.2f}%"
+                )
+            else:
+                # Normal volatility - use base risk
+                adjusted_risk = base_risk_percent
+                self.logger.info(
+                    f"Normal volatility detected (ratio: {volatility_ratio:.2f}). Using base risk of {adjusted_risk:.2f}%"
+                )
+
+            # Ensure risk doesn't exceed the maximum allowed
+            max_risk = self.config.max_risk_percentage
+            if adjusted_risk > max_risk:
+                adjusted_risk = max_risk
+                self.logger.info(f"Capping risk at maximum allowed: {max_risk:.2f}%")
+
+            return adjusted_risk
+
+        except Exception as e:
+            self.logger.error(f"Error in risk adjustment: {e}. Using base risk.")
+            return base_risk_percent
+
+    def detect_volatility_squeeze(self, symbol=None, timeframe=None):
+        """
+        Detect volatility squeeze conditions (narrowing Bollinger Bands and Keltner Channels)
+
+        Parameters
+        ----------
+        symbol : str, optional
+            Trading symbol, defaults to self.symbol
+        timeframe : str, optional
+            Timeframe to analyze, defaults to self.timeframe
+
+        Returns
+        -------
+        bool
+            True if a volatility squeeze is detected
+        """
+        if symbol is None:
+            symbol = self.symbol
+
+        if timeframe is None:
+            timeframe = self.timeframe
+
+        # Get market data
+        data = self.data_manager.get_historical_data(symbol, timeframe, limit=100)
+
+        if data is None or len(data) < 20:
+            return False
+
+        # Calculate Bollinger Bands
+        bb_period = 20
+        bb_stdev = 2.0
+
+        sma = data["close"].rolling(window=bb_period).mean()
+        stdev = data["close"].rolling(window=bb_period).std()
+
+        bb_upper = sma + (stdev * bb_stdev)
+        bb_lower = sma - (stdev * bb_stdev)
+        bb_width = bb_upper - bb_lower
+
+        # Calculate Keltner Channels
+        kc_period = 20
+        kc_multiplier = 1.5
+
+        ema = data["close"].ewm(span=kc_period, adjust=False).mean()
+
+        # Calculate ATR if not already in data
+        if "atr" not in data.columns:
+            atr_period = 14
+            data = calculate_indicators(data, 20, 10, atr_period)
+
+        if "atr" not in data.columns:
+            return False
+
+        atr = data["atr"].iloc[-1]
+
+        kc_upper = ema + (atr * kc_multiplier)
+        kc_lower = ema - (atr * kc_multiplier)
+        kc_width = kc_upper - kc_lower
+
+        # Calculate BB width to KC width ratio for last candle
+        try:
+            bb_kc_ratio = (
+                bb_width.iloc[-1] / kc_width.iloc[-1] if kc_width.iloc[-1] > 0 else 1
+            )
+        except:
+            return False
+
+        # Check for squeeze conditions
+        is_squeeze = bb_kc_ratio < 0.8
+
+        # Log squeeze information
+        logger = logging.getLogger("turtle_trading_bot")
+        if is_squeeze:
+            logger.info(
+                f"Volatility squeeze detected for {symbol} on {timeframe} timeframe"
+            )
+            logger.info(f"  BB/KC ratio: {bb_kc_ratio:.2f}")
+
+        return is_squeeze
+
+    def run_monte_carlo_simulation(self, backtest_results, num_simulations=1000):
+        """
+        Run Monte Carlo simulation on backtest results to analyze risk and robustness
+
+        Parameters
+        ----------
+        backtest_results : pd.DataFrame
+            DataFrame with backtest trade results
+        num_simulations : int
+            Number of Monte Carlo simulations to run
+
+        Returns
+        -------
+        dict
+            Dictionary with simulation results and statistics
+        """
+        logger = logging.getLogger("turtle_trading_bot")
+        logger.info(f"Running Monte Carlo simulation with {num_simulations} iterations")
+
+        if isinstance(backtest_results, list):
+            # Convert to DataFrame if we received a list of trades
+            import pandas as pd
+
+            backtest_results = pd.DataFrame(backtest_results)
+
+        if backtest_results.empty or "profit_pct" not in backtest_results.columns:
+            logger.error("Invalid backtest results for Monte Carlo simulation")
+            return {"error": "Invalid backtest results"}
+
+        import numpy as np
+
+        # Extract profit percentages from backtest results
+        returns = backtest_results["profit_pct"].values
+
+        # Create array to store simulation results
+        simulation_results = np.zeros((num_simulations, len(returns)))
+
+        # Run simulations with random resampling (bootstrap method)
+        for i in range(num_simulations):
+            # Resample returns with replacement
+            sampled_returns = np.random.choice(returns, size=len(returns), replace=True)
+
+            # Calculate cumulative returns for this simulation
+            simulation_results[i, :] = (1 + sampled_returns / 100).cumprod()
+
+        # Calculate statistics from simulations
+        final_values = simulation_results[:, -1]
+
+        # Calculate key statistics
+        mean_final = np.mean(final_values)
+        median_final = np.median(final_values)
+        min_final = np.min(final_values)
+        max_final = np.max(final_values)
+
+        # Calculate percentiles
+        percentiles = {
+            "5%": np.percentile(final_values, 5),
+            "25%": np.percentile(final_values, 25),
+            "50%": np.percentile(final_values, 50),
+            "75%": np.percentile(final_values, 75),
+            "95%": np.percentile(final_values, 95),
+        }
+
+        # Calculate worst drawdown for each simulation
+        max_drawdowns = []
+        for sim in simulation_results:
+            peaks = np.maximum.accumulate(sim)
+            drawdowns = (sim - peaks) / peaks
+            max_drawdowns.append(np.min(drawdowns))
+
+        avg_max_drawdown = np.mean(max_drawdowns)
+        worst_max_drawdown = np.min(max_drawdowns)
+
+        # Log results
+        logger.info("Monte Carlo Simulation Results:")
+        logger.info(f"  Mean final equity: {mean_final:.2f}x initial capital")
+        logger.info(f"  Median final equity: {median_final:.2f}x initial capital")
+        logger.info(f"  Range: {min_final:.2f}x to {max_final:.2f}x")
+        logger.info(f"  Average maximum drawdown: {avg_max_drawdown*100:.2f}%")
+        logger.info(f"  Worst maximum drawdown: {worst_max_drawdown*100:.2f}%")
+
+        # Assemble results dictionary
+        results = {
+            "mean_final": mean_final,
+            "median_final": median_final,
+            "min_final": min_final,
+            "max_final": max_final,
+            "percentiles": percentiles,
+            "avg_max_drawdown": avg_max_drawdown,
+            "worst_max_drawdown": worst_max_drawdown,
+            "simulations": simulation_results.tolist(),
+        }
+
+        return results
+
+    def evaluate_signal_quality_with_ml(
+        self, market_data, signal_type="entry", position_side="BUY"
+    ):
+        """
+        Use a simple machine learning model to evaluate the quality of a trading signal
+
+        Parameters
+        ----------
+        market_data : pd.DataFrame
+            Market data with indicators
+        signal_type : str
+            Type of signal to evaluate ("entry" or "exit")
+        position_side : str
+            Position side ("BUY" or "SELL")
+
+        Returns
+        -------
+        dict
+            Signal quality assessment with probability of success
+        """
+        logger = logging.getLogger("turtle_trading_bot")
+
+        # Check if we have enough data
+        if market_data is None or len(market_data) < 30:
+            return {"score": 0.5, "confidence": "low", "reason": "Insufficient data"}
+
+        try:
+            # Import ML libraries if available
+            try:
+                import numpy as np
+                import pandas as pd
+                from sklearn.ensemble import RandomForestClassifier
+            except ImportError:
+                logger.warning(
+                    "Machine learning libraries not available, using heuristic evaluation"
+                )
+                return self._evaluate_signal_heuristically(
+                    market_data, signal_type, position_side
+                )
+
+            # Extract features for ML model
+            features = self._extract_signal_features(market_data)
+
+            if not features:
+                return {
+                    "score": 0.5,
+                    "confidence": "low",
+                    "reason": "Could not extract features",
+                }
+
+            # Train or load model
+            # In a real implementation, we would load a pre-trained model from disk
+            # For this example, we'll create a simple model based on historical patterns
+
+            # Extract recent market conditions
+            recent_data = market_data.iloc[-5:]
+
+            if signal_type == "entry":
+                if position_side == "BUY":
+                    # Features important for long entries
+                    feature_importance = {
+                        "trend_alignment": 0.3,  # Price above MA
+                        "volatility": 0.2,  # Lower volatility is better for entries
+                        "rsi": 0.15,  # RSI > 50 for uptrend confirmation
+                        "macd": 0.2,  # MACD histogram positive
+                        "volume": 0.15,  # Higher volume on breakout
+                    }
+                else:  # SELL
+                    # Features important for short entries
+                    feature_importance = {
+                        "trend_alignment": 0.3,  # Price below MA
+                        "volatility": 0.2,  # Lower volatility is better for entries
+                        "rsi": 0.15,  # RSI < 50 for downtrend confirmation
+                        "macd": 0.2,  # MACD histogram negative
+                        "volume": 0.15,  # Higher volume on breakdown
+                    }
+            else:  # exit signals
+                # Features important for exits
+                feature_importance = {
+                    "trend_reversal": 0.35,  # Signs of trend reversal
+                    "volatility": 0.25,  # Increase in volatility
+                    "take_profit": 0.25,  # Profit target reached
+                    "momentum": 0.15,  # Loss of momentum
+                }
+
+            # Calculate score for each feature
+            scores = {}
+
+            # 1. Trend alignment
+            if "trend_alignment" in feature_importance:
+                ma_col = "ma" if "ma" in market_data.columns else None
+                if ma_col:
+                    price = recent_data["close"].iloc[-1]
+                    ma = recent_data[ma_col].iloc[-1]
+                    if position_side == "BUY":
+                        scores["trend_alignment"] = 1.0 if price > ma else 0.0
+                    else:
+                        scores["trend_alignment"] = 1.0 if price < ma else 0.0
+                else:
+                    scores["trend_alignment"] = 0.5  # Neutral if no MA
+
+            # 2. Volatility
+            if "volatility" in feature_importance:
+                atr_col = "atr" if "atr" in market_data.columns else None
+                if atr_col:
+                    current_atr = recent_data[atr_col].iloc[-1]
+                    avg_atr = market_data[atr_col].mean()
+
+                    if signal_type == "entry":
+                        # Lower volatility is better for entries (less slippage)
+                        scores["volatility"] = 1.0 if current_atr < avg_atr else 0.5
+                    else:
+                        # Higher volatility can be good for exits (faster moves)
+                        scores["volatility"] = 1.0 if current_atr > avg_atr else 0.5
+                else:
+                    scores["volatility"] = 0.5  # Neutral if no ATR
+
+            # 3. RSI
+            if "rsi" in feature_importance:
+                rsi_col = "rsi" if "rsi" in market_data.columns else None
+                if rsi_col:
+                    rsi = recent_data[rsi_col].iloc[-1]
+                    if position_side == "BUY":
+                        # Higher RSI is better for longs (uptrend momentum)
+                        if rsi > 60:
+                            scores["rsi"] = 1.0
+                        elif rsi > 50:
+                            scores["rsi"] = 0.8
+                        elif rsi > 40:
+                            scores["rsi"] = 0.5
+                        else:
+                            scores["rsi"] = 0.2
+                    else:
+                        # Lower RSI is better for shorts (downtrend momentum)
+                        if rsi < 40:
+                            scores["rsi"] = 1.0
+                        elif rsi < 50:
+                            scores["rsi"] = 0.8
+                        elif rsi < 60:
+                            scores["rsi"] = 0.5
+                        else:
+                            scores["rsi"] = 0.2
+                else:
+                    scores["rsi"] = 0.5  # Neutral if no RSI
+
+            # 4. MACD
+            if "macd" in feature_importance:
+                macd_col = "macd_hist" if "macd_hist" in market_data.columns else None
+                if macd_col:
+                    macd_hist = recent_data[macd_col].iloc[-1]
+                    macd_hist_prev = (
+                        recent_data[macd_col].iloc[-2] if len(recent_data) > 1 else 0
+                    )
+
+                    if position_side == "BUY":
+                        # Positive and increasing MACD histogram is good for longs
+                        if macd_hist > 0 and macd_hist > macd_hist_prev:
+                            scores["macd"] = 1.0
+                        elif macd_hist > 0:
+                            scores["macd"] = 0.8
+                        elif macd_hist > macd_hist_prev:
+                            scores["macd"] = 0.6
+                        else:
+                            scores["macd"] = 0.3
+                    else:
+                        # Negative and decreasing MACD histogram is good for shorts
+                        if macd_hist < 0 and macd_hist < macd_hist_prev:
+                            scores["macd"] = 1.0
+                        elif macd_hist < 0:
+                            scores["macd"] = 0.8
+                        elif macd_hist < macd_hist_prev:
+                            scores["macd"] = 0.6
+                        else:
+                            scores["macd"] = 0.3
+                else:
+                    scores["macd"] = 0.5  # Neutral if no MACD
+
+            # 5. Volume
+            if "volume" in feature_importance:
+                if "volume" in market_data.columns:
+                    current_volume = recent_data["volume"].iloc[-1]
+                    avg_volume = market_data["volume"].iloc[-10:].mean()
+
+                    if current_volume > avg_volume * 1.5:
+                        scores["volume"] = 1.0  # Strong volume
+                    elif current_volume > avg_volume:
+                        scores["volume"] = 0.8  # Above average volume
+                    else:
+                        scores["volume"] = 0.5  # Average or below volume
+                else:
+                    scores["volume"] = 0.5  # Neutral if no volume data
+
+            # 6. Trend reversal for exits
+            if "trend_reversal" in feature_importance:
+                if all(col in market_data.columns for col in ["dc_upper", "dc_lower"]):
+                    dc_upper = recent_data["dc_upper"].iloc[-1]
+                    dc_lower = recent_data["dc_lower"].iloc[-1]
+                    price = recent_data["close"].iloc[-1]
+
+                    if position_side == "BUY":
+                        # For longs, price approaching lower DC is a warning
+                        distance_to_lower = (price - dc_lower) / price
+                        if distance_to_lower < 0.01:
+                            scores["trend_reversal"] = 0.9  # Very close to lower DC
+                        elif distance_to_lower < 0.02:
+                            scores["trend_reversal"] = 0.7  # Approaching lower DC
+                        else:
+                            scores["trend_reversal"] = 0.3  # Not near lower DC
+                    else:
+                        # For shorts, price approaching upper DC is a warning
+                        distance_to_upper = (dc_upper - price) / price
+                        if distance_to_upper < 0.01:
+                            scores["trend_reversal"] = 0.9  # Very close to upper DC
+                        elif distance_to_upper < 0.02:
+                            scores["trend_reversal"] = 0.7  # Approaching upper DC
+                        else:
+                            scores["trend_reversal"] = 0.3  # Not near upper DC
+                else:
+                    scores["trend_reversal"] = 0.5  # Neutral if no DC channels
+
+            # 7. Take profit for exits
+            if "take_profit" in feature_importance:
+                if (
+                    "entry_price" in self.position_state.__dict__
+                    and self.position_state.active
+                ):
+                    entry_price = self.position_state.entry_price
+                    current_price = recent_data["close"].iloc[-1]
+                    atr = (
+                        recent_data["atr"].iloc[-1]
+                        if "atr" in recent_data.columns
+                        else 0
+                    )
+
+                    if position_side == "BUY":
+                        profit_atr = (
+                            (current_price - entry_price) / atr if atr > 0 else 0
+                        )
+                        if profit_atr > 3:
+                            scores["take_profit"] = (
+                                1.0  # 3+ ATR profit, good exit point
+                            )
+                        elif profit_atr > 2:
+                            scores["take_profit"] = 0.8  # 2+ ATR profit, consider exit
+                        elif profit_atr > 1:
+                            scores["take_profit"] = 0.6  # 1+ ATR profit, watch closely
+                        else:
+                            scores["take_profit"] = 0.3  # Less than 1 ATR, hold
+                    else:
+                        profit_atr = (
+                            (entry_price - current_price) / atr if atr > 0 else 0
+                        )
+                        if profit_atr > 3:
+                            scores["take_profit"] = (
+                                1.0  # 3+ ATR profit, good exit point
+                            )
+                        elif profit_atr > 2:
+                            scores["take_profit"] = 0.8  # 2+ ATR profit, consider exit
+                        elif profit_atr > 1:
+                            scores["take_profit"] = 0.6  # 1+ ATR profit, watch closely
+                        else:
+                            scores["take_profit"] = 0.3  # Less than 1 ATR, hold
+                else:
+                    scores["take_profit"] = 0.5  # Neutral if no position or ATR
+
+            # 8. Momentum for exits
+            if "momentum" in feature_importance:
+                if "rsi" in market_data.columns:
+                    rsi = recent_data["rsi"].iloc[-1]
+                    rsi_prev = recent_data["rsi"].iloc[-3:].mean()  # Average of last 3
+
+                    if position_side == "BUY":
+                        # For longs, decreasing RSI may signal loss of momentum
+                        if rsi < rsi_prev * 0.9:
+                            scores["momentum"] = 0.9  # Significant RSI decrease
+                        elif rsi < rsi_prev:
+                            scores["momentum"] = 0.7  # Mild RSI decrease
+                        else:
+                            scores["momentum"] = 0.3  # RSI steady or increasing
+                    else:
+                        # For shorts, increasing RSI may signal loss of downward momentum
+                        if rsi > rsi_prev * 1.1:
+                            scores["momentum"] = 0.9  # Significant RSI increase
+                        elif rsi > rsi_prev:
+                            scores["momentum"] = 0.7  # Mild RSI increase
+                        else:
+                            scores["momentum"] = 0.3  # RSI steady or decreasing
+                else:
+                    scores["momentum"] = 0.5  # Neutral if no RSI
+
+            # Calculate weighted score
+            weighted_score = 0
+            for feature, weight in feature_importance.items():
+                if feature in scores:
+                    weighted_score += scores[feature] * weight
+
+            # Classify the signal
+            if weighted_score > 0.7:
+                confidence = "high"
+                classification = "strong_signal"
+            elif weighted_score > 0.5:
+                confidence = "medium"
+                classification = "moderate_signal"
+            else:
+                confidence = "low"
+                classification = "weak_signal"
+
+            # Format return value
+            result = {
+                "score": weighted_score,
+                "confidence": confidence,
+                "classification": classification,
+                "feature_scores": scores,
+            }
+
+            logger.info(
+                f"Signal quality assessment ({signal_type}/{position_side}): {weighted_score:.2f} ({confidence})"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in ML signal evaluation: {e}")
+            return {"score": 0.5, "confidence": "low", "reason": f"Error: {str(e)}"}
+
+    def _extract_signal_features(self, market_data):
+        """
+        Extract features for machine learning model from market data
+
+        Parameters
+        ----------
+        market_data : pd.DataFrame
+            Market data with indicators
+
+        Returns
+        -------
+        dict
+            Dictionary of extracted features
+        """
+        # Ensure we have enough data
+        if market_data is None or len(market_data) < 5:
+            return {}
+
+        # Get the most recent data points
+        recent = market_data.iloc[-5:]
+
+        features = {}
+
+        # Price action features
+        features["close"] = recent["close"].iloc[-1]
+        features["open"] = recent["open"].iloc[-1]
+
+        # Trend features
+        if "ma" in recent.columns:
+            features["price_to_ma"] = recent["close"].iloc[-1] / recent["ma"].iloc[-1]
+
+        # Volatility features
+        if "atr" in recent.columns:
+            features["atr"] = recent["atr"].iloc[-1]
+            if len(market_data) > 20:
+                features["atr_percentile"] = (
+                    sum(1 for x in market_data["atr"].iloc[-20:] if x < features["atr"])
+                    / 20
+                )
+
+        # Momentum features
+        if "rsi" in recent.columns:
+            features["rsi"] = recent["rsi"].iloc[-1]
+            features["rsi_slope"] = recent["rsi"].iloc[-1] - recent["rsi"].iloc[-3]
+
+        # Trend features
+        if all(col in recent.columns for col in ["dc_upper", "dc_lower"]):
+            dc_middle = (recent["dc_upper"] + recent["dc_lower"]) / 2
+            features["price_to_dc_middle"] = (
+                recent["close"].iloc[-1] / dc_middle.iloc[-1]
+            )
+
+        # MACD features
+        if all(col in recent.columns for col in ["macd", "macd_signal"]):
+            features["macd_hist"] = (
+                recent["macd"].iloc[-1] - recent["macd_signal"].iloc[-1]
+            )
+            if len(recent) > 1:
+                prev_hist = recent["macd"].iloc[-2] - recent["macd_signal"].iloc[-2]
+                features["macd_hist_change"] = features["macd_hist"] - prev_hist
+
+        # Volume features
+        if "volume" in recent.columns:
+            features["volume"] = recent["volume"].iloc[-1]
+            if len(market_data) > 20:
+                avg_volume = market_data["volume"].iloc[-20:].mean()
+                features["volume_ratio"] = (
+                    features["volume"] / avg_volume if avg_volume > 0 else 1
+                )
+
+        # Check for two-way price action
+        features["has_two_way_action"] = check_two_way_price_action(market_data)
+
+        # Check for squeeze
+        if "squeeze" in recent.columns:
+            features["is_squeeze"] = recent["squeeze"].iloc[-1]
+
+        return features
+
+    def _evaluate_signal_heuristically(self, market_data, signal_type, position_side):
+        """
+        Evaluate signal quality using simple heuristics when ML is not available
+
+        Parameters
+        ----------
+        market_data : pd.DataFrame
+            Market data with indicators
+        signal_type : str
+            Type of signal to evaluate ("entry" or "exit")
+        position_side : str
+            Position side ("BUY" or "SELL")
+
+        Returns
+        -------
+        dict
+            Signal quality assessment
+        """
+        # Extract features
+        features = self._extract_signal_features(market_data)
+
+        score = 0.5  # Neutral starting point
+        reasons = []
+
+        # Entry signal evaluation
+        if signal_type == "entry":
+            # Check trend alignment
+            if "price_to_ma" in features:
+                if position_side == "BUY" and features["price_to_ma"] > 1.02:
+                    score += 0.1
+                    reasons.append("Price well above MA")
+                elif position_side == "BUY" and features["price_to_ma"] > 1.0:
+                    score += 0.05
+                    reasons.append("Price above MA")
+                elif position_side == "SELL" and features["price_to_ma"] < 0.98:
+                    score += 0.1
+                    reasons.append("Price well below MA")
+                elif position_side == "SELL" and features["price_to_ma"] < 1.0:
+                    score += 0.05
+                    reasons.append("Price below MA")
+
+            # Check RSI
+            if "rsi" in features:
+                if position_side == "BUY" and features["rsi"] > 60:
+                    score += 0.1
+                    reasons.append("Strong RSI")
+                elif position_side == "SELL" and features["rsi"] < 40:
+                    score += 0.1
+                    reasons.append("Weak RSI")
+
+            # Check MACD
+            if "macd_hist" in features and "macd_hist_change" in features:
+                if (
+                    position_side == "BUY"
+                    and features["macd_hist"] > 0
+                    and features["macd_hist_change"] > 0
+                ):
+                    score += 0.1
+                    reasons.append("Positive MACD histogram")
+                elif (
+                    position_side == "SELL"
+                    and features["macd_hist"] < 0
+                    and features["macd_hist_change"] < 0
+                ):
+                    score += 0.1
+                    reasons.append("Negative MACD histogram")
+
+            # Penalty for two-way price action
+            if features.get("has_two_way_action", False):
+                score -= 0.15
+                reasons.append("Two-way price action detected")
+
+        # Exit signal evaluation
+        else:
+            # Check trend reversal
+            if "price_to_ma" in features:
+                if position_side == "BUY" and features["price_to_ma"] < 0.98:
+                    score += 0.15
+                    reasons.append("Price below MA")
+                elif position_side == "SELL" and features["price_to_ma"] > 1.02:
+                    score += 0.15
+                    reasons.append("Price above MA")
+
+            # Check RSI reversal
+            if "rsi" in features and "rsi_slope" in features:
+                if position_side == "BUY" and features["rsi"] < 40:
+                    score += 0.1
+                    reasons.append("RSI below 40")
+                elif position_side == "BUY" and features["rsi_slope"] < -10:
+                    score += 0.1
+                    reasons.append("RSI dropping")
+                elif position_side == "SELL" and features["rsi"] > 60:
+                    score += 0.1
+                    reasons.append("RSI above 60")
+                elif position_side == "SELL" and features["rsi_slope"] > 10:
+                    score += 0.1
+                    reasons.append("RSI rising")
+
+            # Check volume
+            if "volume_ratio" in features and features["volume_ratio"] > 1.5:
+                score += 0.1
+                reasons.append("High volume")
+
+        # Cap score between 0 and 1
+        score = max(0, min(1, score))
+
+        # Classify confidence
+        if score > 0.7:
+            confidence = "high"
+        elif score > 0.5:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        return {"score": score, "confidence": confidence, "reasons": reasons}
+
+    def multi_timeframe_analysis(self, symbol):
+        logger = logging.getLogger("turtle_trading_bot")
+
+        try:
+            # Emin olmak için veriyi güncelle
+            self.update_market_data()
+
+            # Veri yoksa işlemi durdur
+            trend_data = self.data_manager.get_historical_data(
+                symbol, self.trend_timeframe, limit=100
+            )
+            if trend_data is None or len(trend_data) < 20:
+                logger.warning(f"Insufficient trend data for {symbol}")
+                return False, None, None
+
+            # MA sütununu kontrol et, yoksa hesapla
+            if "ma" not in trend_data.columns:
+                logger.info(f"MA column not found in trend data, calculating...")
+                trend_data = calculate_ma(trend_data, 200)
+
+            entry_data = self.data_manager.get_historical_data(
+                symbol, self.entry_timeframe, limit=100
+            )
+            if entry_data is None or len(entry_data) < 20:
+                logger.warning(f"Insufficient entry data for {symbol}")
+                return False, None, None
+
+            # Entry verisi için MA hesapla
+            if "ma" not in entry_data.columns:
+                logger.info(f"MA column not found in entry data, calculating...")
+                entry_data = calculate_ma(entry_data, 200)
+
+            base_data = self.data_manager.get_historical_data(
+                symbol, self.timeframe, limit=100
+            )
+            if base_data is None or len(base_data) < 20:
+                logger.warning(f"Insufficient base data for {symbol}")
+                return False, None, None
+
+            # Base verisi için MA hesapla
+            if "ma" not in base_data.columns:
+                logger.info(f"MA column not found in base data, calculating...")
+                base_data = calculate_ma(base_data, 200)
+
+            # Göstergeleri hesapla - MA'dan önce
+            config = self.config
+
+            trend_data = calculate_indicators(
+                trend_data,
+                config.dc_length_enter,
+                config.dc_length_exit,
+                config.atr_length,
+                atr_smooth=config.atr_smoothing,
+                ma_period=config.ma_period,
+                include_additional=True,
+            )
+
+            entry_data = calculate_indicators(
+                entry_data,
+                config.dc_length_enter,
+                config.dc_length_exit,
+                config.atr_length,
+                atr_smooth=config.atr_smoothing,
+                ma_period=config.ma_period,
+                include_additional=True,
+            )
+
+            base_data = calculate_indicators(
+                base_data,
+                config.dc_length_enter,
+                config.dc_length_exit,
+                config.atr_length,
+                atr_smooth=config.atr_smoothing,
+                ma_period=config.ma_period,
+                include_additional=True,
+            )
+
+            # Her bir veri kümesinde MA olduğunu kontrol et
+            for df_name, df in [
+                ("trend_data", trend_data),
+                ("entry_data", entry_data),
+                ("base_data", base_data),
+            ]:
+                if "ma" not in df.columns or df["ma"].isna().all():
+                    logger.warning(
+                        f"MA column missing or all NaN in {df_name}, recalculating..."
+                    )
+                    # MA sütununu tekrar hesapla
+                    df["ma"] = df["close"].rolling(window=200).mean()
+
+            # Analiz koduna devam et...
+            # ... (Mevcut analiz kodu) ...
+
+            return True, None, None  # Başarı durumunu ve sonuçları döndür
+
+        except KeyError as e:
+            if str(e) == "'ma'":
+                logger.warning("MA indicator not found, calculating...")
+
+                # Verileri çektikten sonra doğrudan MA hesapla
+                trend_data = self.data_manager.get_historical_data(
+                    symbol, self.trend_timeframe, limit=100
+                )
+                entry_data = self.data_manager.get_historical_data(
+                    symbol, self.entry_timeframe, limit=100
+                )
+                base_data = self.data_manager.get_historical_data(
+                    symbol, self.timeframe, limit=100
+                )
+
+                # Her veri kümesi için MA hesapla
+                trend_data["ma"] = trend_data["close"].rolling(window=200).mean()
+                entry_data["ma"] = entry_data["close"].rolling(window=200).mean()
+                base_data["ma"] = base_data["close"].rolling(window=200).mean()
+
+                # Diğer göstergeleri hesapla
+                config = self.config
+                trend_data = calculate_indicators(
+                    trend_data,
+                    config.dc_length_enter,
+                    config.dc_length_exit,
+                    config.atr_length,
+                )
+                entry_data = calculate_indicators(
+                    entry_data,
+                    config.dc_length_enter,
+                    config.dc_length_exit,
+                    config.atr_length,
+                )
+                base_data = calculate_indicators(
+                    base_data,
+                    config.dc_length_enter,
+                    config.dc_length_exit,
+                    config.atr_length,
+                )
+
+                # Analizi tekrar çalıştır
+                logger.info("Retrying analysis with recalculated MA...")
+                return self.multi_timeframe_analysis(symbol)
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Error during multi-timeframe analysis: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())  # Tüm hata izini logla
+            return False, None, None

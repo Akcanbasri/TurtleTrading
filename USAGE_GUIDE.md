@@ -1,6 +1,6 @@
 # TurtleTrading Bot - Usage Guide
 
-This guide explains how to set up, test, and effectively use the TurtleTrading bot with its dynamic leverage features.
+This guide explains how to set up, configure, and effectively use the TurtleTrading bot with its advanced multi-timeframe analysis capabilities.
 
 ## Setup
 
@@ -14,7 +14,7 @@ This guide explains how to set up, test, and effectively use the TurtleTrading b
 
 1. Clone the repository and navigate to it:
    ```bash
-   git clone https://github.com/Akcanbasri/TurtleTrading.git
+   git clone https://github.com/yourusername/TurtleTrading.git
    cd TurtleTrading
    ```
 
@@ -30,7 +30,44 @@ This guide explains how to set up, test, and effectively use the TurtleTrading b
 
 4. Edit the `.env` file with your Binance API credentials and preferred settings
 
-## Testing
+## Running the Bot
+
+### Available Command-Line Options
+
+The bot offers several command-line arguments for different modes of operation:
+
+```bash
+# Basic operation
+python turtle_trading_bot.py
+
+# Test mode - analyze without executing trades
+python turtle_trading_bot.py --test
+
+# Backtest mode
+python turtle_trading_bot.py --backtest --days 30
+
+# Demo mode with synthetic data (no API keys needed)
+python turtle_trading_bot.py --demo
+
+# Clear cache before starting
+python turtle_trading_bot.py --clear-cache
+
+# Use predefined timeframe settings
+python turtle_trading_bot.py --preset crypto_standard
+```
+
+### Available Presets
+
+The bot comes with several predefined configuration presets:
+
+- `crypto_fast`: Optimized for short-term cryptocurrency trading
+- `crypto_standard`: Balanced settings for medium-term crypto trading
+- `crypto_swing`: Longer-term swing trading settings for cryptocurrencies
+- `forex_standard`: Settings tuned for forex markets
+- `stocks_daily`: Daily timeframe settings for stock trading 
+- `original_turtle`: Classic Turtle Trading strategy parameters
+
+## Testing Environment
 
 ### Using Binance Testnet
 
@@ -39,149 +76,226 @@ This guide explains how to set up, test, and effectively use the TurtleTrading b
 3. Add these keys to your `.env` file
 4. Ensure `USE_TESTNET=True` in your `.env` file
 
-### Running in Analysis Mode
+### Running in Test Mode
 
-To run the bot in analysis mode without executing trades:
+To analyze the market without executing trades:
 
 ```bash
-python turtle_trading_bot.py --analyze
+python turtle_trading_bot.py --test
 ```
 
-This will display market analysis, entry/exit signals, and position sizing calculations without placing actual orders.
+This will:
+- Process market data and calculate indicators
+- Generate entry/exit signals
+- Display potential trades and position sizes
+- Log analysis results
+- Not place any actual orders
 
-### Monitoring Test Results
+### Demo Mode
 
-1. Check the `logs` directory for detailed operation logs
-2. Monitor the terminal output for real-time information
-3. Analyze backtesting results (if generated) in the `backtest_results` directory
+For testing without a Binance account:
 
-## Live Trading
+```bash
+python turtle_trading_bot.py --demo
+```
 
-### Configuration Recommendations
+This mode generates synthetic data to simulate trading, making it useful for strategy testing without any API connection.
 
-When moving to live trading, consider these recommendations:
-
-1. Start with a small account balance (20-50 USDT)
-2. Use conservative risk settings: 
-   - `RISK_PER_TRADE=0.01` (1% per trade)
-   - `MAX_RISK_PERCENTAGE=0.05` (5% maximum risk)
-3. Begin with simpler settings:
-   - `USE_PYRAMIDING=False`
-   - `USE_TRAILING_STOP=True`
-   - `USE_PARTIAL_EXITS=True`
-
-### Enabling Live Trading
-
-1. Set `USE_TESTNET=False` in your `.env` file
-2. Use your real Binance API credentials
-3. Start the bot in regular mode:
-   ```bash
-   python turtle_trading_bot.py
-   ```
-
-## Understanding Dynamic Leverage
+## Understanding Multi-Timeframe Analysis
 
 ### How It Works
 
-The bot automatically adjusts leverage based on:
+The bot analyzes multiple timeframes simultaneously to improve trading decisions:
 
-1. **Account Size:**
-   - <20 USDT: Maximum 5x leverage
-   - <50 USDT: Maximum 7x leverage
-   - <100 USDT: Maximum 10x leverage
-   - >100 USDT: Uses configured leverage
+1. **Trend Timeframe** (higher timeframe):
+   - Used to determine the primary market trend
+   - Moving average crosses identify long-term trend direction
+   - ADX indicator measures trend strength
 
-2. **Trade Direction:**
-   - Trades aligned with the main trend: Higher leverage (MAX_LEVERAGE_TREND)
-   - Counter-trend trades: Lower leverage (MAX_LEVERAGE_COUNTER)
+2. **Entry Timeframe** (medium timeframe):
+   - Used to find optimal entry points
+   - Donchian Channel breakouts generate trading signals
+   - Additional filters reduce false signals
 
-3. **Minimum Position Size:**
-   - The bot enforces a 5 USDT minimum position value
-   - For very small accounts, this may require using the maximum allowed leverage
+3. **Execution Timeframe** (lower timeframe):
+   - Used for precise entry and exit timing
+   - Helps optimize trade execution
+   - Provides finer detail for stop loss placement
 
-### Example Scenarios
+### Key Indicators
 
-**Scenario 1: Small Account (20 USDT)**
-- Risk per trade: 2% = 0.4 USDT
-- For a BTC position with high ATR volatility, leverage might automatically adjust to 5x
-- This allows meaningful position sizes while maintaining risk limits
+- **Donchian Channels**: Identify range breakouts
+- **Moving Averages**: Determine trend direction
+- **ATR (Average True Range)**: Measure volatility for position sizing
+- **ADX (Average Directional Index)**: Evaluate trend strength
+- **RSI (Relative Strength Index)**: Identify overbought/oversold conditions
+- **Bollinger Bands**: Detect volatility contractions (squeezes)
 
-**Scenario 2: Medium Account (60 USDT)**
-- Risk per trade: 2% = 1.2 USDT
-- Trend-aligned trade: May use up to 7x leverage
-- Counter-trend trade: Limited to 1.5x leverage
+## Bot Configuration
+
+### Essential .env Variables
+
+```
+# API Configuration
+BINANCE_API_KEY=your_api_key
+BINANCE_API_SECRET=your_api_secret
+USE_TESTNET=True
+
+# Trading Pair and Timeframes
+SYMBOL=BTCUSDT
+TIMEFRAME=1h
+TREND_TIMEFRAME=4h
+ENTRY_TIMEFRAME=1h
+
+# Risk Parameters
+RISK_PER_TRADE=0.02
+MAX_RISK_PERCENTAGE=0.05
+STOP_LOSS_ATR_MULTIPLE=1.5
+
+# Strategy Parameters
+DC_LENGTH_ENTER=20
+DC_LENGTH_EXIT=10
+ATR_LENGTH=14
+MA_PERIOD=200
+ADX_THRESHOLD=25
+
+# Feature Toggles
+USE_MULTI_TIMEFRAME=True
+USE_PYRAMIDING=True
+USE_TRAILING_STOP=True
+USE_PARTIAL_EXITS=True
+USE_ADX_FILTER=True
+USE_MA_FILTER=True
+```
+
+### Key Configuration Options
+
+#### Risk Management
+
+- `RISK_PER_TRADE`: Percentage of account balance risked per trade (e.g., 0.02 for 2%)
+- `MAX_RISK_PERCENTAGE`: Maximum total risk exposure across all positions
+- `STOP_LOSS_ATR_MULTIPLE`: ATR multiplier for stop loss placement
+
+#### Strategy Parameters
+
+- `DC_LENGTH_ENTER`: Donchian Channel period for entry signals
+- `DC_LENGTH_EXIT`: Donchian Channel period for exit signals
+- `ATR_LENGTH`: ATR calculation period
+- `MA_PERIOD`: Moving Average period for trend determination
+- `ADX_THRESHOLD`: Minimum ADX value to consider a trend strong
+
+#### Feature Toggles
+
+- `USE_MULTI_TIMEFRAME`: Enable multi-timeframe analysis
+- `USE_PYRAMIDING`: Allow adding to existing positions in trend direction
+- `USE_TRAILING_STOP`: Enable trailing stop loss
+- `USE_PARTIAL_EXITS`: Take partial profits at predetermined levels
+
+## Live Trading
+
+### Preparation
+
+Before running in live trading mode:
+
+1. Test thoroughly on the Binance testnet
+2. Start with small position sizes
+3. Use conservative risk settings:
+   - `RISK_PER_TRADE=0.01` (1% per trade)
+   - `MAX_RISK_PERCENTAGE=0.03` (3% maximum total risk)
+4. Monitor the bot's operation closely during the first few trades
+
+### Configuration for Live Trading
+
+1. Set `USE_TESTNET=False` in your `.env` file
+2. Use your real Binance API credentials with appropriate permissions
+3. Consider starting with simpler settings:
+   - `USE_PYRAMIDING=False`
+   - `USE_MULTI_TIMEFRAME=True`
+   - `USE_TRAILING_STOP=True`
 
 ## Monitoring Your Bot
 
-### Real-time Monitoring
+### Log Files
 
-The bot outputs detailed information to:
-- The console (real-time updates)
-- Log files in the `logs` directory (comprehensive details)
+The bot generates detailed logs in the `logs` directory:
 
-### Important Metrics to Watch
+- `turtle_trading_bot.log`: Main log with all bot operations
+- Error logs with specific error details
+- Debug logs with detailed process information
 
-1. **Leverage Used:** Check that the leverage is appropriate for your account size
-2. **Position Size:** Verify that positions are neither too small nor too large
-3. **Risk Per Trade:** Confirm that actual risk matches your configuration
-4. **Win Rate & Profit:** Track performance over time
+### Performance Metrics
 
-### Stopping the Bot
+The bot tracks and logs these key performance metrics:
 
-To stop the bot safely:
-- Press `Ctrl+C` in the terminal
-- The bot will complete any pending operations before shutting down
+1. Win Rate: Percentage of profitable trades
+2. Risk-Reward Ratio: Average profit compared to risk taken
+3. Maximum Drawdown: Largest peak-to-trough decline
+4. Profit Factor: Gross profit divided by gross loss
+
+### Bot State
+
+The bot state is saved in `config/bot_state.json` and includes:
+
+- Current position information
+- Trading history
+- Performance metrics
+- Last analysis results
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Insufficient Balance Errors:**
-   - Check your account balance
-   - Reduce the risk percentage or leverage
+1. **'ma' Error:**
+   - Problem: Error message containing "Error during multi-timeframe analysis: 'ma'"
+   - Solution: Use `--clear-cache` option to reset data cache
+   
+2. **Insufficient Balance Errors:**
+   - Problem: Not enough funds to place orders
+   - Solution: Check account balance or decrease risk percentage
+   
+3. **Invalid Quantity Errors:**
+   - Problem: Order quantity doesn't meet exchange requirements
+   - Solution: Check minimum order size for the trading pair
 
-2. **Invalid Quantity Errors:**
-   - Some trading pairs have minimum quantity requirements
-   - The bot will try to adjust automatically, but may not always succeed
-
-3. **API Connection Issues:**
-   - Verify your API keys are correct
-   - Check your internet connection
-   - Ensure the Binance API is operational
+4. **Data Connection Issues:**
+   - Problem: Errors retrieving market data
+   - Solution: Check internet connection and API key permissions
 
 ### Getting Help
 
 If you encounter problems:
-1. Check the detailed logs in the `logs` directory
-2. Review the [GitHub Issues](https://github.com/Akcanbasri/TurtleTrading/issues) section
-3. Open a new issue with detailed information about your problem
+1. Check detailed logs in the `logs` directory
+2. Look for error messages in the terminal output
+3. Open an issue on GitHub with the error details and bot configuration
 
 ## Advanced Usage
 
 ### Customizing Strategy Parameters
 
-For experienced users, you can fine-tune these parameters:
+For experienced users, these parameters can be fine-tuned:
 
-1. **Trend Detection:**
-   - `TREND_TIMEFRAME` - Higher timeframes provide more reliable trends
-   - `MA_PERIOD` - Longer periods for long-term trends, shorter for more sensitivity
+1. **Donchian Channel Periods:**
+   - Longer periods (20-55) for fewer but more reliable signals
+   - Shorter periods (10-20) for more frequent trading opportunities
 
-2. **Entry/Exit Timing:**
-   - `DC_LENGTH_ENTER` - Higher values for fewer but more reliable entries
-   - `DC_LENGTH_EXIT` - Lower values for quicker exits
+2. **Moving Average Periods:**
+   - Longer periods (100-200) for stable long-term trends
+   - Shorter periods (50-100) for more responsive trend detection
 
-3. **Risk Management:**
-   - `STOP_LOSS_ATR_MULTIPLE` - Higher values for wider stops (more breathing room)
-   - `FIRST_TARGET_ATR` and `SECOND_TARGET_ATR` - Adjust profit targets
-   
-### Event-Driven Updates
+3. **ATR Settings:**
+   - Longer periods (14-21) for more stable volatility measurement
+   - Shorter periods (7-14) for quicker adaptation to changing volatility
 
-1. Run with automatic updates on market events:
-   ```bash
-   python turtle_trading_bot.py --live
-   ```
+### Backtesting
 
-2. This mode will update positions based on real-time market events rather than candle closes
+Run backtests to evaluate strategy performance:
+
+```bash
+python turtle_trading_bot.py --backtest --days 30
+```
+
+Parameters:
+- `--days`: Number of days to backtest (default: 30)
 
 ## Disclaimer
 

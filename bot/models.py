@@ -284,6 +284,69 @@ class BotConfig:
             if not attr.startswith("__") and not callable(getattr(self, attr))
         }
 
+    def load_timeframe_preset(self, preset_name):
+        """
+        Load timeframe preset settings from config file
+
+        Args:
+            preset_name: Name of the preset to load
+
+        Returns:
+            bool: Whether the preset was loaded successfully
+        """
+        import json
+        import logging
+        from pathlib import Path
+
+        logger = logging.getLogger("turtle_trading_bot")
+
+        preset_file = Path("bot/config/timeframe_presets.json")
+
+        if not preset_file.exists():
+            logger.error(f"Preset file {preset_file} does not exist")
+            return False
+
+        try:
+            with open(preset_file, "r") as f:
+                presets = json.load(f)
+
+            if preset_name not in presets:
+                logger.error(f"Preset '{preset_name}' not found in presets file")
+                logger.info(f"Available presets: {list(presets.keys())}")
+                return False
+
+            preset = presets[preset_name]
+            logger.info(
+                f"Loading timeframe preset: {preset_name} - {preset['description']}"
+            )
+
+            # Set timeframes
+            self.timeframe = preset.get("timeframe", self.timeframe)
+            self.trend_timeframe = preset.get("trend_timeframe", self.trend_timeframe)
+            self.entry_timeframe = preset.get("entry_timeframe", self.entry_timeframe)
+
+            # Set indicator parameters
+            self.dc_length_enter = preset.get("dc_length_enter", self.dc_length_enter)
+            self.dc_length_exit = preset.get("dc_length_exit", self.dc_length_exit)
+            self.atr_length = preset.get("atr_length", self.atr_length)
+
+            # Ensure multi-timeframe is enabled if we're using different timeframes
+            if (
+                self.timeframe != self.trend_timeframe
+                or self.timeframe != self.entry_timeframe
+            ):
+                self.use_multi_timeframe = True
+
+            logger.info(f"Timeframe preset '{preset_name}' loaded successfully")
+            logger.info(
+                f"New timeframes: Base={self.timeframe}, Trend={self.trend_timeframe}, Entry={self.entry_timeframe}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Error loading timeframe preset: {e}")
+            return False
+
 
 TradeSide = Literal["BUY", "SELL"]
 OrderResult = Dict[str, Any]
