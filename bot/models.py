@@ -24,50 +24,123 @@ class SymbolInfo:
 
 @dataclass
 class PositionState:
-    """Position state tracking"""
+    """Current position state and information."""
 
-    active: bool = False
-    entry_price: Decimal = Decimal("0")
-    quantity: Decimal = Decimal("0")
-    stop_loss_price: Decimal = Decimal("0")
-    take_profit_price: Decimal = Decimal("0")
-    side: str = ""  # 'BUY' or 'SELL'
-    entry_time: int = 0
-    entry_atr: Decimal = Decimal("0")
-    # Pramit yaklaşımı için
-    entries: List[Dict[str, Any]] = None
-    current_entry_level: int = 0
-    trailing_stop_price: Decimal = Decimal("0")
-    # Pyramid tracking
-    entry_count: int = 0
-    last_entry_time: int = 0
-    # Partial exits tracking
-    first_target_reached: bool = False
-    second_target_reached: bool = False
-    partial_exit_taken: bool = False
-
-    def __post_init__(self):
-        if self.entries is None:
-            self.entries = []
-
-    def reset(self) -> None:
-        """Reset position state to default values"""
+    def __init__(self):
+        """Initialize an empty position state."""
         self.active = False
-        self.entry_price = Decimal("0")
-        self.quantity = Decimal("0")
-        self.stop_loss_price = Decimal("0")
-        self.take_profit_price = Decimal("0")
-        self.side = ""
-        self.entry_time = 0
-        self.entry_atr = Decimal("0")
-        self.entries = []
-        self.current_entry_level = 0
-        self.trailing_stop_price = Decimal("0")
+        self.side = None  # "BUY" for long, "SELL" for short
+        self.entry_price = 0.0
+        self.quantity = 0.0
+        self.stop_loss_price = 0.0
+        self.take_profit_price = 0.0
+        self.entry_time = None
+        self.exit_time = None
+        self.exit_price = 0.0
+        self.pnl_amount = 0.0
+        self.pnl_percentage = 0.0
+        self.exit_reason = None
+        self.signal_strength = 0.0
+        self.max_running_profit = 0.0
+        self.max_running_loss = 0.0
+        self.trades_count = 0
+        self.entry_count = 0  # For pyramiding
+        self.profit_trades = 0
+        self.loss_trades = 0
+
+        # Added fields for enhanced tracking
+        self.trailing_stop_price = None
+        self.trailing_stop_activated = False
+        self.partial_exit_executed = False
+        self.partial_exit_price = 0.0
+        self.partial_exit_time = None
+        self.first_target_price = 0.0
+        self.second_target_price = 0.0
+        self.max_price = 0.0  # Highest price reached during the trade (for longs)
+        self.min_price = 0.0  # Lowest price reached during the trade (for shorts)
+        self.entry_atr = 0.0  # ATR at time of entry
+        self.entry_signal_type = None  # e.g., "dc_breakout", "pullback"
+        self.entry_signal_timeframe = None  # e.g., "5m", "15m"
+
+    def update(self, **kwargs):
+        """Update position state attributes."""
+        # Only update attributes that are passed in kwargs
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+    def reset(self):
+        """Reset position state."""
+        self.active = False
+        self.side = None
+        self.entry_price = 0.0
+        self.quantity = 0.0
+        self.stop_loss_price = 0.0
+        self.take_profit_price = 0.0
+        self.entry_time = None
+        self.exit_time = None
+        self.exit_price = 0.0
+        self.pnl_amount = 0.0
+        self.pnl_percentage = 0.0
+        self.exit_reason = None
+        self.signal_strength = 0.0
+        self.max_running_profit = 0.0
+        self.max_running_loss = 0.0
         self.entry_count = 0
-        self.last_entry_time = 0
-        self.first_target_reached = False
-        self.second_target_reached = False
-        self.partial_exit_taken = False
+
+        # Reset enhanced tracking fields
+        self.trailing_stop_price = None
+        self.trailing_stop_activated = False
+        self.partial_exit_executed = False
+        self.partial_exit_price = 0.0
+        self.partial_exit_time = None
+        self.first_target_price = 0.0
+        self.second_target_price = 0.0
+        self.max_price = 0.0
+        self.min_price = 0.0
+        self.entry_atr = 0.0
+        self.entry_signal_type = None
+        self.entry_signal_timeframe = None
+
+    def calculate_unrealized_pnl(self, current_price):
+        """
+        Calculate unrealized profit/loss percentage based on current price
+
+        Parameters
+        ----------
+        current_price : float
+            Current market price
+
+        Returns
+        -------
+        float
+            Unrealized PnL percentage
+        """
+        if not self.active or self.entry_price == 0:
+            return 0.0
+
+        if self.side == "BUY":
+            pnl_percentage = (
+                (current_price - self.entry_price) / self.entry_price
+            ) * 100
+        else:  # SELL
+            pnl_percentage = (
+                (self.entry_price - current_price) / self.entry_price
+            ) * 100
+
+        # Update max profit/drawdown tracking
+        if pnl_percentage > 0 and pnl_percentage > self.max_running_profit:
+            self.max_running_profit = pnl_percentage
+        elif pnl_percentage < 0 and abs(pnl_percentage) > abs(self.max_running_loss):
+            self.max_running_loss = pnl_percentage
+
+        # Update max/min price tracking
+        if self.side == "BUY" and current_price > self.max_price:
+            self.max_price = current_price
+        elif self.side == "SELL" and current_price < self.min_price:
+            self.min_price = current_price
+
+        return pnl_percentage
 
 
 def save_position_state(position: PositionState, symbol: str) -> None:
@@ -99,13 +172,30 @@ def save_position_state(position: PositionState, symbol: str) -> None:
         "entry_time": position.entry_time,
         "entry_atr": str(position.entry_atr),
         "entry_count": position.entry_count,
-        "last_entry_time": position.last_entry_time,
-        "first_target_reached": position.first_target_reached,
-        "second_target_reached": position.second_target_reached,
-        "partial_exit_taken": position.partial_exit_taken,
+        "exit_time": position.exit_time,
+        "exit_price": str(position.exit_price),
+        "pnl_amount": str(position.pnl_amount),
+        "pnl_percentage": str(position.pnl_percentage),
+        "exit_reason": position.exit_reason,
+        "signal_strength": position.signal_strength,
+        "max_running_profit": str(position.max_running_profit),
+        "max_running_loss": str(position.max_running_loss),
+        "trades_count": position.trades_count,
+        "profit_trades": position.profit_trades,
+        "loss_trades": position.loss_trades,
         "trailing_stop_price": (
             str(position.trailing_stop_price) if position.trailing_stop_price else None
         ),
+        "trailing_stop_activated": position.trailing_stop_activated,
+        "partial_exit_executed": position.partial_exit_executed,
+        "partial_exit_price": str(position.partial_exit_price),
+        "partial_exit_time": position.partial_exit_time,
+        "first_target_price": str(position.first_target_price),
+        "second_target_price": str(position.second_target_price),
+        "max_price": str(position.max_price),
+        "min_price": str(position.min_price),
+        "entry_signal_type": position.entry_signal_type,
+        "entry_signal_timeframe": position.entry_signal_timeframe,
         "symbol": symbol,
     }
 

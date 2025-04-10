@@ -494,6 +494,11 @@ def calculate_indicators(
     # Calculate Donchian Channels for Exit
     df_result = calculate_donchian_channel(df_result, dc_exit, suffix="_exit")
 
+    # Map Donchian Channel columns to the names expected by the bot
+    df_result["dc_upper"] = df_result["dc_upper_entry"]
+    df_result["dc_lower"] = df_result["dc_lower_entry"]
+    df_result["dc_middle"] = df_result["dc_middle_entry"]
+
     # Calculate ATR
     df_result = calculate_atr(df_result, atr_len, atr_smooth)
 
@@ -532,18 +537,19 @@ def check_entry_signal(row, side):
 
     Args:
         row: DataFrame row with indicators
-        side: Position side ("BUY" or "SELL")
+        side: Position side ("BUY"/"long" or "SELL"/"short")
 
     Returns:
         bool: True if there's an entry signal, False otherwise
     """
     try:
-        if side == "BUY":
+        # Use dc_upper_entry and dc_lower_entry columns
+        if side == "BUY" or side == "long":
             # Long entry when price breaks above upper Donchian Channel
-            return row["close"] > row["dc_upper"]
-        elif side == "SELL":
+            return row["close"] > row["dc_upper_entry"]
+        elif side == "SELL" or side == "short":
             # Short entry when price breaks below lower Donchian Channel
-            return row["close"] < row["dc_lower"]
+            return row["close"] < row["dc_lower_entry"]
         else:
             return False
     except Exception as e:
@@ -607,12 +613,13 @@ def check_exit_signal(row, side):
         bool: True if there's an exit signal, False otherwise
     """
     try:
+        # Use dc_upper_exit and dc_lower_exit columns
         if side == "BUY":
             # Exit long position when price breaks below lower Donchian Channel
-            return row["close"] < row["dc_lower"]
+            return row["close"] < row["dc_lower_exit"]
         elif side == "SELL":
             # Exit short position when price breaks above upper Donchian Channel
-            return row["close"] > row["dc_upper"]
+            return row["close"] > row["dc_upper_exit"]
         else:
             return False
     except Exception as e:
@@ -826,19 +833,18 @@ def check_rsi_conditions(row: pd.Series, side: str) -> bool:
     if "rsi" not in row:
         return True  # No RSI filter if RSI is not calculated
 
-    if side == "BUY":
-        # For long entries, RSI should be above 40 (not oversold)
-        # but below 70 (not overbought)
-        return 40 <= row["rsi"] <= 70
+    # Wider RSI conditions as requested
+    if side == "BUY" or side == "long":
+        # For long entries, RSI should be between 30-80
+        return 30 <= row["rsi"] <= 80
     else:
-        # For short entries, RSI should be below 60 (not overbought)
-        # but above 30 (not oversold)
-        return 30 <= row["rsi"] <= 60
+        # For short entries, RSI should be between 20-70
+        return 20 <= row["rsi"] <= 70
 
 
 def check_macd_confirmation(row: pd.Series, side: str) -> bool:
     """
-    Check MACD confirmation for entry signal
+    Check MACD confirmation for entry signal - only verify MACD vs Signal line position
 
     Parameters
     ----------
@@ -855,12 +861,12 @@ def check_macd_confirmation(row: pd.Series, side: str) -> bool:
     if "macd" not in row or "macd_signal" not in row:
         return True  # No MACD filter if MACD is not calculated
 
-    if side == "BUY":
+    if side == "BUY" or side == "long":
         # For long entries: MACD > Signal Line (bullish momentum)
-        return row["macd"] > row["macd_signal"] and row["macd_hist"] > 0
+        return row["macd"] > row["macd_signal"]
     else:
         # For short entries: MACD < Signal Line (bearish momentum)
-        return row["macd"] < row["macd_signal"] and row["macd_hist"] < 0
+        return row["macd"] < row["macd_signal"]
 
 
 def calculate_indicators_incremental(
@@ -1696,3 +1702,73 @@ def get_optimal_parameters_for_regime(regime: str) -> dict:
 
     # Default case
     return default_params
+
+
+def log_signal_conditions(
+    logger,
+    row: pd.Series,
+    signal_type: str,
+    conditions: dict,
+    signal_direction: str = None,
+) -> int:
+    """
+    Log detailed information about which signal conditions are met
+
+    Parameters
+    ----------
+    logger : Logger
+        Logger instance to use for logging
+    row : pd.Series
+        DataFrame row with indicator values
+    signal_type : str
+        Type of signal (e.g., 'ENTRY', 'EXIT')
+    conditions : dict
+        Dictionary with condition names as keys and boolean values indicating if met
+    signal_direction : str, optional
+        Signal direction ('long' or 'short') if applicable
+
+    Returns
+    -------
+    int
+        Number of conditions met out of total
+    """
+    direction_str = f" {signal_direction.upper()}" if signal_direction else ""
+    logger.info(f"===== {signal_type}{direction_str} SIGNAL CONDITIONS =====")
+
+    # Check how many conditions were met
+    conditions_met = sum(1 for v in conditions.values() if v)
+    total_conditions = len(conditions)
+
+    # Log each condition with checkmark/cross and actual values
+    for name, is_met in conditions.items():
+        check_symbol = "✅" if is_met else "❌"
+        value_info = ""
+
+        # Extract actual values for common indicators based on condition name
+        if "DC" in name.upper():
+            if "UPPER" in name.upper() and "dc_upper" in row:
+                value_info = (
+                    f"Price: {row['close']:.4f} vs DC Upper: {row['dc_upper']:.4f}"
+                )
+            elif "LOWER" in name.upper() and "dc_lower" in row:
+                value_info = (
+                    f"Price: {row['close']:.4f} vs DC Lower: {row['dc_lower']:.4f}"
+                )
+        elif "ATR" in name.upper() and "atr" in row:
+            value_info = f"ATR: {row['atr']:.4f}"
+        elif "RSI" in name.upper() and "rsi" in row:
+            target = "30-80" if signal_direction == "long" else "20-70"
+            value_info = f"RSI: {row['rsi']:.1f} (Target: {target})"
+        elif "MACD" in name.upper() and "macd" in row and "macd_signal" in row:
+            value_info = f"MACD: {row['macd']:.4f} vs Signal: {row['macd_signal']:.4f}"
+        elif "ADX" in name.upper() and "adx" in row:
+            value_info = f"ADX: {row['adx']:.1f}"
+
+        # Log the condition with its values
+        logger.info(f"{check_symbol} {name}: {value_info}")
+
+    # Log summary of conditions met
+    logger.info(f"✓ {conditions_met}/{total_conditions} conditions met")
+    logger.info("=" * 40)
+
+    return conditions_met

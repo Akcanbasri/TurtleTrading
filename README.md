@@ -1,6 +1,113 @@
-# TurtleTrading - Advanced Algorithmic Trading Bot
+# Optimized Turtle Trading Bot for Cryptocurrency Markets
 
-A robust algorithmic trading bot implementing the Turtle Trading strategy with advanced features including multi-timeframe analysis, adaptive trend detection, and sophisticated risk management.
+An enhanced Turtle Trading implementation optimized for cryptocurrency markets, with advanced signal detection, risk management, and market regime adaptability.
+
+## Key Optimizations
+
+### 1. Reduced Filter Requirements
+
+- **Optional Trend Alignment**: Configure `TREND_ALIGNMENT_REQUIRED=False` to allow counter-trend trades
+- **Lower ADX Threshold**: Reduced to 15 (from 25) to catch more potential moves
+- **Simplified Confirmation**: Requires either RSI OR MACD confirmation, not both
+- **Modified Entry Signal**: Enhanced `check_entry_signal()` to handle both long/short scenarios
+
+### 2. Adjusted Signal Parameters
+
+- **Shorter DC Length**: Decreased Donchian Channel entry period to 15 (from 20)
+- **Wider RSI Ranges**: 
+  - Long entries: 30-80 (formerly 40-70)
+  - Short entries: 20-70 (formerly 30-60)
+- **Simplified MACD**: Only checks MACD vs Signal line without histogram requirements
+
+### 3. Detailed Logging
+
+- **Condition-by-Condition Checks**: Visual ✅/❌ indicators for each filter
+- **Value Displays**: Shows actual indicator values vs thresholds
+- **Entry Requirement Counts**: Displays how many requirements were met (e.g., "4/6 requirements met")
+- **Clear Signal Indicators**: Visual confirmation for triggered signals
+
+### 4. Market Regime Detection
+
+- **Regime Classification**: Automatically identifies market conditions:
+  - Trending (up/down/sideways)
+  - Ranging
+  - Squeeze (low volatility, potential breakout)
+  - Volatile
+- **Dynamic Parameters**: Adjusts strategy parameters based on current regime
+- **Squeeze Breakout Detection**: Optimized for breakouts during low volatility periods
+- **Two-Way Price Action**: Avoids trading in choppy, ranging markets
+
+### 5. Enhanced Risk Management
+
+- **Dynamic Leverage**: Sets appropriate leverage (3-5x) based on:
+  - Signal strength
+  - Market regime
+  - Weekend volatility adjustments
+- **Partial Take-Profits**: Implements automatic partial exits at:
+  - 2x ATR (30% of position)
+  - 3x ATR (30% of position)
+- **Position Sizing**: Dynamically adjusts position size based on volatility
+- **Weekend Adjustments**: Reduces risk during typically volatile weekend periods
+
+## Usage
+
+To run the optimized bot:
+
+```python
+from bot.turtle_optimized import check_optimized_entry_signal, execute_optimized_entry, check_optimized_exit_conditions
+
+# Check for entry signals
+entry_signal, details = check_optimized_entry_signal(market_data, trend_data, "long", config)
+
+# Execute entry if signal detected
+if entry_signal:
+    success, order_details = execute_optimized_entry(
+        exchange=exchange,
+        symbol="BTCUSDT",
+        direction="long",
+        current_price=details["price"],
+        atr_value=details["atr"],
+        signal_strength=details["signal_strength"],
+        market_regime=details["market_regime"],
+        position=position,
+        config=config
+    )
+    
+# Check for exit signals
+exit_signal, reason = check_optimized_exit_conditions(market_data, position, current_price)
+```
+
+## Performance Dashboard
+
+The trading bot maintains a performance dashboard that tracks:
+
+- Win rate by market regime type
+- Profit factor
+- Average win/loss metrics
+- Risk-adjusted returns
+- Signal quality statistics
+
+## Configuration
+
+Modify the following environment variables to adjust the optimized bot's behavior:
+
+```
+# Signal Parameters
+DC_LENGTH_ENTER=15
+DC_LENGTH_EXIT=8
+ADX_THRESHOLD=15
+TREND_ALIGNMENT_REQUIRED=False
+
+# Risk Management
+USE_PARTIAL_EXITS=True
+FIRST_TARGET_ATR=2.0
+SECOND_TARGET_ATR=3.0
+BASE_LEVERAGE=3
+MAX_LEVERAGE=5
+
+# Market Regime
+USE_REGIME_DETECTION=True
+```
 
 ## Key Features
 
@@ -40,7 +147,7 @@ The TurtleTrading bot's strategy is based on these core components:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/TurtleTrading
+   git clone https://github.com/Akcanbasri/TurtleTrading
    cd TurtleTrading
    ```
 

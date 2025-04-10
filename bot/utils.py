@@ -11,6 +11,7 @@ from pathlib import Path
 from decimal import Decimal
 from typing import Optional, Union
 from bot.models import PositionState
+from datetime import datetime
 
 
 def setup_logging(name: str = "turtle_trading_bot") -> logging.Logger:
@@ -116,10 +117,12 @@ def format_price(price: Union[Decimal, float], precision: Optional[int] = None) 
 
 
 def format_quantity(
-    quantity: Union[Decimal, float], precision: Optional[int] = None
+    quantity: Union[Decimal, float],
+    precision: Optional[int] = None,
+    step_size: Optional[Decimal] = None,
 ) -> str:
     """
-    Format quantity with the correct number of decimal places
+    Format quantity with the correct number of decimal places and step size
 
     Parameters
     ----------
@@ -127,12 +130,18 @@ def format_quantity(
         Quantity to format
     precision : Optional[int]
         Number of decimal places (if None, use quantity_precision from symbol info)
+    step_size : Optional[Decimal]
+        Step size from exchange rules for rounding
 
     Returns
     -------
     str
         Formatted quantity string
     """
+    # First round to step size if provided
+    if step_size is not None:
+        quantity = round_step_size(quantity, step_size)
+
     if precision is None:
         precision = 8  # Default precision if not specified
 
@@ -263,29 +272,27 @@ def save_position_state(
     """
     logger = logging.getLogger("turtle_trading_bot")
 
-    # Convert position to dictionary
-    state = {
-        "active": position.active,
-        "entry_price": str(position.entry_price),
-        "quantity": str(position.quantity),
-        "stop_loss_price": str(position.stop_loss_price),
-        "take_profit_price": str(position.take_profit_price),
-        "side": position.side,
-        "entry_time": position.entry_time,
-        "entry_atr": str(position.entry_atr),
-        "entry_count": position.entry_count,
-        "last_entry_time": position.last_entry_time,
-        "first_target_reached": position.first_target_reached,
-        "second_target_reached": position.second_target_reached,
-        "partial_exit_taken": position.partial_exit_taken,
-        "trailing_stop_price": (
-            str(position.trailing_stop_price) if position.trailing_stop_price else None
-        ),
-        "symbol": symbol,
-        "last_update": int(time.time() * 1000),
-    }
-
     try:
+        # Convert position to dictionary - use all attributes from the object
+        state = {}
+        # Get all attributes that don't start with underscore
+        for attr_name in dir(position):
+            if not attr_name.startswith("_") and not callable(
+                getattr(position, attr_name)
+            ):
+                attr_value = getattr(position, attr_name)
+                # Convert special types to string
+                if isinstance(attr_value, Decimal):
+                    state[attr_name] = str(attr_value)
+                elif isinstance(attr_value, (datetime, time.struct_time)):
+                    state[attr_name] = str(attr_value)
+                else:
+                    state[attr_name] = attr_value
+
+        # Add symbol and timestamp
+        state["symbol"] = symbol
+        state["last_update"] = int(time.time() * 1000)
+
         # Create config directory if it doesn't exist
         state_file.parent.mkdir(exist_ok=True)
 
@@ -332,28 +339,40 @@ def load_position_state(
             )
             return None
 
-        # Handle trailing stop price (might be None)
-        trailing_stop_price = None
-        if state.get("trailing_stop_price") is not None:
-            trailing_stop_price = Decimal(state.get("trailing_stop_price"))
+        # Create a new position state
+        position = PositionState()
 
-        # Load state
-        position = PositionState(
-            active=state.get("active", False),
-            entry_price=Decimal(state.get("entry_price", "0")),
-            quantity=Decimal(state.get("quantity", "0")),
-            stop_loss_price=Decimal(state.get("stop_loss_price", "0")),
-            take_profit_price=Decimal(state.get("take_profit_price", "0")),
-            side=state.get("side", ""),
-            entry_time=state.get("entry_time", 0),
-            entry_atr=Decimal(state.get("entry_atr", "0")),
-            trailing_stop_price=trailing_stop_price or Decimal("0"),
-            entry_count=state.get("entry_count", 0),
-            last_entry_time=state.get("last_entry_time", 0),
-            first_target_reached=state.get("first_target_reached", False),
-            second_target_reached=state.get("second_target_reached", False),
-            partial_exit_taken=state.get("partial_exit_taken", False),
-        )
+        # Update attributes from the loaded state
+        for key, value in state.items():
+            if hasattr(position, key) and key not in ["symbol", "last_update"]:
+                # Convert string representation of Decimal back to Decimal
+                if key in [
+                    "entry_price",
+                    "quantity",
+                    "stop_loss_price",
+                    "take_profit_price",
+                    "trailing_stop_price",
+                    "entry_atr",
+                    "partial_exit_price",
+                    "first_target_price",
+                    "second_target_price",
+                    "max_price",
+                    "min_price",
+                    "max_running_profit",
+                    "max_running_loss",
+                    "pnl_amount",
+                    "pnl_percentage",
+                ]:
+                    if value is not None and value != "None":
+                        setattr(position, key, float(value))
+                # Handle timestamps
+                elif key in ["entry_time", "exit_time", "partial_exit_time"]:
+                    if value is not None and value != "None":
+                        # If it's a string representation of datetime, convert appropriately
+                        # For simplicity, we're keeping it as string here
+                        setattr(position, key, value)
+                else:
+                    setattr(position, key, value)
 
         logger.info(f"Bot state loaded from {state_file}")
         return position

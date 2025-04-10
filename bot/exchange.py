@@ -5,13 +5,14 @@ Exchange operations using Binance API for the Turtle Trading Bot
 import logging
 import time
 from decimal import Decimal
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 import pandas as pd
 import numpy as np
 import websocket
 import json
 import threading
 from queue import Queue
+import traceback
 
 try:
     # Futures API için yeni import
@@ -28,11 +29,11 @@ except ImportError:
     BINANCE_FUTURES_AVAILABLE = False
 
 from bot.models import SymbolInfo, TradeSide
-from bot.utils import format_price, format_quantity
+from bot.utils import format_price, format_quantity, round_step_size
 
 
 class BinanceWebSocketManager:
-    def __init__(self, symbol, callback, use_testnet=True):
+    def __init__(self, symbol, callback=None, use_testnet=True, auto_reconnect=True):
         self.symbol = symbol.lower()
         self.callback = callback
         self.ws = None
@@ -43,33 +44,54 @@ class BinanceWebSocketManager:
         self.reconnect_count = 0
         self.max_reconnects = 5
         self.reconnect_delay = 5  # seconds
-        self.should_reconnect = True
+        self.should_reconnect = auto_reconnect
 
         # WebSocket URL'leri
         self.ws_base_url = (
-            "wss://fstream.binance.com/ws/"
+            "wss://fstream.binance.com/stream?streams="
             if not use_testnet
-            else "wss://stream.binancefuture.com/ws/"
+            else "wss://stream.binancefuture.com/stream?streams="
         )
         self.last_ping_time = time.time()
         self.logger = logging.getLogger("turtle_trading_bot")
 
     def _on_message(self, ws, message):
         data = json.loads(message)
+        self.logger.debug(f"Received WebSocket message: {data.keys()}")
 
-        # Handle pong responses
-        if "result" in data and data["result"] is None and "id" in data:
+        # For combined streams, data contains the stream name and the data
+        if "data" in data and "stream" in data:
+            stream_data = data["data"]
+
+            # Process kline data
+            if "k" in stream_data:
+                kline = self._process_kline_data(stream_data)
+                self.data_queue.put({"type": "kline", "data": kline})
+            # Process bookTicker data - this comes more frequently
+            elif "b" in stream_data and "a" in stream_data:
+                ticker = self._process_ticker_data(stream_data)
+                self.data_queue.put({"type": "ticker", "data": ticker})
+
+                # Call the real-time price check function in callback if provided
+                if hasattr(self, "price_check_callback") and self.price_check_callback:
+                    self.price_check_callback(ticker)
+
+        # Handle pong responses or direct stream data
+        elif "result" in data and data["result"] is None and "id" in data:
             self.logger.debug("Received pong from server")
             return
-
-        # Process kline data
-        if "k" in data:
+        # Handle direct stream data (for legacy format or single streams)
+        elif "k" in data:
             kline = self._process_kline_data(data)
             self.data_queue.put({"type": "kline", "data": kline})
-        # Process bookTicker data
+        # Process direct bookTicker data
         elif "b" in data and "a" in data:
             ticker = self._process_ticker_data(data)
             self.data_queue.put({"type": "ticker", "data": ticker})
+
+            # Call the real-time price check function in callback if provided
+            if hasattr(self, "price_check_callback") and self.price_check_callback:
+                self.price_check_callback(ticker)
 
     def _process_kline_data(self, data):
         """Process kline websocket data into a standardized format"""
@@ -124,18 +146,12 @@ class BinanceWebSocketManager:
         self.is_connected = True
         self.reconnect_count = 0  # Reset reconnect counter on successful connection
 
-        # Subscribe to multiple streams
-        subscribe_msg = {
-            "method": "SUBSCRIBE",
-            "params": [
-                f"{self.symbol}@kline_1m",  # 1-minute candles
-                f"{self.symbol}@kline_5m",  # 5-minute candles
-                f"{self.symbol}@kline_15m",  # 15-minute candles
-                f"{self.symbol}@bookTicker",  # Best bid/ask
-            ],
-            "id": 1,
-        }
-        ws.send(json.dumps(subscribe_msg))
+        # No need to create a new WebSocketApp here, as we're already in the callback
+        # Just send subscribe message for the combined streams
+        self.logger.info(f"Subscribing to streams for {self.symbol}")
+
+        # For combined streams URL, we don't need to send a subscribe message
+        # The streams are already specified in the URL
 
     def _process_queue(self):
         while self.is_connected:
@@ -161,8 +177,19 @@ class BinanceWebSocketManager:
             return
 
         websocket.enableTrace(False)  # Set to True for debugging
+
+        # Properly construct WebSocket URL with streams
+        streams = [
+            f"{self.symbol}@kline_1m",  # 1-minute candles
+            f"{self.symbol}@kline_5m",  # 5-minute candles
+            f"{self.symbol}@kline_15m",  # 15-minute candles
+            f"{self.symbol}@bookTicker",  # Best bid/ask
+        ]
+        ws_url = f"{self.ws_base_url}{'/'.join(streams)}"
+
+        self.logger.info(f"Connecting to WebSocket URL: {ws_url}")
         self.ws = websocket.WebSocketApp(
-            self.ws_base_url,
+            ws_url,
             on_open=self._on_open,
             on_message=self._on_message,
             on_error=self._on_error,
@@ -225,9 +252,15 @@ class BinanceExchange:
     - Order execution
     """
 
-    def __init__(self, api_key: str, api_secret: str, use_testnet: bool = True):
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        testnet: bool = True,
+        demo_mode: bool = False,
+    ):
         """
-        Initialize Binance exchange client
+        Initialize the Binance Exchange wrapper for Futures trading
 
         Parameters
         ----------
@@ -235,321 +268,140 @@ class BinanceExchange:
             Binance API key
         api_secret : str
             Binance API secret
-        use_testnet : bool
-            Whether to use the Binance testnet
+        testnet : bool, optional
+            Whether to use the testnet, by default True
+        demo_mode : bool, optional
+            Whether to run in demo mode without actual trades, by default False
         """
         self.logger = logging.getLogger("turtle_trading_bot")
         self.api_key = api_key
         self.api_secret = api_secret
-        self.use_testnet = use_testnet
-
-        # Futures API base URL'leri
-        if use_testnet:
-            self.futures_base_url = "https://testnet.binancefuture.com"
-        else:
-            self.futures_base_url = "https://fapi.binance.com"
+        self.testnet = testnet
+        self.demo_mode = demo_mode
 
         # Initialize clients
-        self.client, self.futures_client = self._initialize_client()
-
-    def _initialize_client(self):
-        """
-        Initialize Binance client with API credentials
-
-        Returns
-        -------
-        tuple
-            (spot_client, futures_client)
-
-        Raises
-        ------
-        ValueError
-            If API credentials are missing
-        ClientError
-            If there's an issue with the Binance API
-        """
-        if not self.api_key or not self.api_secret:
-            self.logger.error("API Key or Secret Key not found.")
-
-            # Create a minimal mock client for demo purposes
-            class MockClient:
-                def ping(self):
-                    return True
-
-                def time(self):
-                    return {"serverTime": int(time.time() * 1000)}
-
-                def account(self):
-                    return {
-                        "accountType": "DEMO",
-                        "canTrade": True,
-                        "balances": [
-                            {"asset": "USDT", "free": "10000.00", "locked": "0.00"},
-                            {"asset": "BTC", "free": "1.00", "locked": "0.00"},
-                        ],
-                    }
-
-                def klines(self, *args, **kwargs):
-                    # This will force the _generate_synthetic_data to be called
-                    return []
-
-                def exchange_info(self, **kwargs):
-                    # Return a simulated symbol info
-                    symbol = kwargs.get("symbol", "BTCUSDT")
-                    return {
-                        "symbols": [
-                            {
-                                "symbol": symbol,
-                                "filters": [
-                                    {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
-                                    {
-                                        "filterType": "LOT_SIZE",
-                                        "minQty": "0.001",
-                                        "stepSize": "0.001",
-                                    },
-                                    {
-                                        "filterType": "MIN_NOTIONAL",
-                                        "minNotional": "10.0",
-                                    },
-                                ],
-                            }
-                        ]
-                    }
-
-                def ticker_price(self, **kwargs):
-                    # Return a simulated ticker with current price
-                    symbol = kwargs.get("symbol", "BTCUSDT")
-                    if symbol == "BTCUSDT":
-                        return {"price": "30000.00"}
-                    elif symbol == "ETHUSDT":
-                        return {"price": "2000.00"}
-                    else:
-                        return {"price": "100.00"}
-
-                def new_order(self, **kwargs):
-                    # Return a simulated order response
-                    symbol = kwargs.get("symbol", "UNKNOWN")
-                    side = kwargs.get("side", "BUY")
-                    quantity = kwargs.get("quantity", "0.001")
-
-                    order_time = int(time.time() * 1000)
-                    price = 30000.0 if symbol == "BTCUSDT" else 2000.0
-
-                    return {
-                        "symbol": symbol,
-                        "orderId": f"demo_{order_time}",
-                        "clientOrderId": f"demo_{order_time}_client",
-                        "transactTime": order_time,
-                        "price": "0.00000000",
-                        "origQty": str(quantity),
-                        "executedQty": str(quantity),
-                        "cumQuote": str(float(quantity) * price),
-                        "status": "FILLED",
-                        "timeInForce": "GTC",
-                        "type": "MARKET",
-                        "side": side,
-                        "avgPrice": str(price),
-                    }
-
-                def balance(self, **kwargs):
-                    return [
-                        {
-                            "asset": "USDT",
-                            "balance": "10000.00",
-                            "availableBalance": "10000.00",
-                        },
-                        {"asset": "BTC", "balance": "1.00", "availableBalance": "1.00"},
-                    ]
-
-                def change_leverage(self, **kwargs):
-                    return {"leverage": kwargs.get("leverage", 1)}
-
-            self.logger.warning("Using mock client for demo mode")
-            return MockClient(), MockClient()
-
         try:
-            spot_client = None
-            futures_client = None
-
+            # Initialize Futures client if available
             if BINANCE_FUTURES_AVAILABLE:
-                # Modern Binance kütüphanesi (v2+) kullanım
-                if self.use_testnet:
-                    self.logger.info(
-                        "Initializing Binance Futures client in TESTNET mode"
-                    )
-                    futures_client = UMFutures(
-                        key=self.api_key,
-                        secret=self.api_secret,
-                        base_url="https://testnet.binancefuture.com",
-                    )
-                    spot_client = Spot(
-                        key=self.api_key,
-                        secret=self.api_secret,
-                        base_url="https://testnet.binance.vision",
-                    )
-                else:
-                    self.logger.info(
-                        "Initializing Binance Futures client in PRODUCTION mode"
-                    )
-                    futures_client = UMFutures(key=self.api_key, secret=self.api_secret)
-                    spot_client = Spot(key=self.api_key, secret=self.api_secret)
-            else:
-                # Eski Binance kütüphanesi (v1) kullanım
-                if self.use_testnet:
-                    self.logger.info(
-                        "Initializing Binance client in TESTNET mode (legacy)"
-                    )
-                    spot_client = Client(self.api_key, self.api_secret, testnet=True)
-                else:
-                    self.logger.info(
-                        "Initializing Binance client in PRODUCTION mode (legacy)"
-                    )
-                    spot_client = Client(self.api_key, self.api_secret)
-                futures_client = spot_client  # Legacy mode, aynı client kullanılacak
-
-            # Test connectivity
-            if BINANCE_FUTURES_AVAILABLE:
-                futures_client.ping()
-                server_time = futures_client.time()
-            else:
-                spot_client.ping()
-                server_time = spot_client.get_server_time()
-
-            self.logger.info(f"Connected to Binance. Server time: {server_time}")
-
-            # Verify account access for futures
-            try:
-                if BINANCE_FUTURES_AVAILABLE:
-                    account_info = futures_client.account()
-                    account_type = "FUTURES"
-                else:
-                    account_info = spot_client.get_account()
-                    account_type = account_info.get("accountType", "UNKNOWN")
-
-                can_trade = True
-                if "canTrade" in account_info:
-                    can_trade = account_info["canTrade"]
-
-                self.logger.info(
-                    f"Account status: {account_type}, canTrade: {can_trade}"
+                self.futures_client = UMFutures(
+                    key=api_key,
+                    secret=api_secret,
+                    testnet=testnet,
+                    base_url="https://testnet.binancefuture.com" if testnet else None,
                 )
-            except Exception as e:
-                self.logger.warning(f"Could not get account info: {e}")
-                self.logger.warning("Will use Spot API for basic operations")
+                self.logger.info(f"Futures API initialized (testnet: {testnet})")
 
-            return spot_client, futures_client
+                # Try to handle time synchronization
+                try:
+                    # Check server time and sync
+                    server_time = self.futures_client.time()
+                    time_diff = int(time.time() * 1000) - server_time["serverTime"]
+                    if (
+                        abs(time_diff) > 1000
+                    ):  # If time difference is more than 1 second
+                        self.logger.warning(
+                            f"Time difference with Binance server: {time_diff}ms. Adjusting..."
+                        )
+                        # For Python-Binance, we can adjust the timestamp offset
+                        self.futures_client.timestamp_offset = time_diff
+                        self.logger.info(f"Timestamp offset adjusted to {time_diff}ms")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to synchronize time with Binance server: {e}"
+                    )
+                    self.logger.info(
+                        "Continuing without time synchronization. Some operations may fail."
+                    )
+
+            # Initialize Spot client for backup or when Futures API not available
+            self.spot_client = Client(
+                api_key=api_key,
+                api_secret=api_secret,
+                testnet=testnet,
+            )
+            self.logger.info(f"Spot API initialized (testnet: {testnet})")
+
+            # Also try to sync time with spot client if futures wasn't available
+            if not BINANCE_FUTURES_AVAILABLE:
+                try:
+                    server_time = self.spot_client.get_server_time()
+                    time_diff = int(time.time() * 1000) - server_time["serverTime"]
+                    if abs(time_diff) > 1000:
+                        self.logger.warning(
+                            f"Time difference with Binance server: {time_diff}ms. Adjusting..."
+                        )
+                        # For legacy Python-Binance client, we can just log it
+                        self.logger.info("Adjustment may be needed in requests")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to synchronize time with Binance spot server: {e}"
+                    )
+                    self.logger.info(
+                        "Continuing without time synchronization. Some operations may fail."
+                    )
 
         except Exception as e:
-            self.logger.error(f"Binance API Exception: {e}")
+            self.logger.error(f"Error initializing Binance client: {e}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            raise ConnectionError(f"Failed to connect to Binance API: {e}")
 
-            # If this is likely a demo run or testnet, return a mock client
-            if "demo" in (self.api_key or "").lower() or self.use_testnet:
-                self.logger.warning(
-                    "API error but using mock client for demo/test mode"
-                )
+        # Initialize WebSocket manager
+        self.ws_manager = BinanceWebSocketManager(
+            symbol="btcusdt",  # Default symbol, will be updated later
+            callback=self._on_ws_message if hasattr(self, "_on_ws_message") else None,
+            use_testnet=testnet,
+            auto_reconnect=True,
+        )
 
-                class MockClient:
-                    def ping(self):
-                        return True
+        # Cache for symbol info
+        self.symbol_info_cache = {}
+        self.last_prices = {}
 
-                    def time(self):
-                        return {"serverTime": int(time.time() * 1000)}
+        # Callbacks for WebSocket data
+        self.kline_callbacks = {}
+        self.ticker_callbacks = {}
 
-                    def account(self):
-                        return {
-                            "accountType": "DEMO",
-                            "canTrade": True,
-                            "balances": [
-                                {"asset": "USDT", "free": "10000.00", "locked": "0.00"},
-                                {"asset": "BTC", "free": "1.00", "locked": "0.00"},
-                            ],
-                        }
+        # Stats and monitoring
+        self.ws_message_count = 0
+        self.last_ws_message_time = None
 
-                    def klines(self, **kwargs):
-                        # This will force the _generate_synthetic_data to be called
-                        return []
+    def _on_ws_message(self, message):
+        """
+        Process WebSocket message
 
-                    def exchange_info(self, **kwargs):
-                        # Return a simulated symbol info
-                        symbol = kwargs.get("symbol", "BTCUSDT")
-                        return {
-                            "symbols": [
-                                {
-                                    "symbol": symbol,
-                                    "filters": [
-                                        {
-                                            "filterType": "PRICE_FILTER",
-                                            "tickSize": "0.01",
-                                        },
-                                        {
-                                            "filterType": "LOT_SIZE",
-                                            "minQty": "0.001",
-                                            "stepSize": "0.001",
-                                        },
-                                        {
-                                            "filterType": "MIN_NOTIONAL",
-                                            "minNotional": "10.0",
-                                        },
-                                    ],
-                                }
-                            ]
-                        }
+        Parameters
+        ----------
+        message : dict
+            Message from WebSocket
+        """
+        try:
+            self.ws_message_count += 1
+            self.last_ws_message_time = time.time()
 
-                    def ticker_price(self, **kwargs):
-                        # Return a simulated ticker with current price
-                        symbol = kwargs.get("symbol", "BTCUSDT")
-                        if symbol == "BTCUSDT":
-                            return {"price": "30000.00"}
-                        elif symbol == "ETHUSDT":
-                            return {"price": "2000.00"}
-                        else:
-                            return {"price": "100.00"}
+            # Extract data based on message type
+            if message.get("type") == "kline":
+                kline_data = message.get("data", {})
+                symbol = kline_data.get("symbol", "").lower()
 
-                    def new_order(self, **kwargs):
-                        # Return a simulated order response
-                        symbol = kwargs.get("symbol", "UNKNOWN")
-                        side = kwargs.get("side", "BUY")
-                        quantity = kwargs.get("quantity", "0.001")
+                # Call all registered callbacks for this symbol's klines
+                if symbol in self.kline_callbacks and self.kline_callbacks[symbol]:
+                    self.kline_callbacks[symbol](kline_data)
 
-                        order_time = int(time.time() * 1000)
-                        price = 30000.0 if symbol == "BTCUSDT" else 2000.0
+            elif message.get("type") == "ticker":
+                ticker_data = message.get("data", {})
+                symbol = ticker_data.get("symbol", "").lower()
 
-                        return {
-                            "symbol": symbol,
-                            "orderId": f"demo_{order_time}",
-                            "clientOrderId": f"demo_{order_time}_client",
-                            "transactTime": order_time,
-                            "price": "0.00000000",
-                            "origQty": str(quantity),
-                            "executedQty": str(quantity),
-                            "cumQuote": str(float(quantity) * price),
-                            "status": "FILLED",
-                            "timeInForce": "GTC",
-                            "type": "MARKET",
-                            "side": side,
-                            "avgPrice": str(price),
-                        }
+                # Update last price
+                if symbol and "ask_price" in ticker_data:
+                    self.last_prices[symbol] = float(ticker_data["ask_price"])
 
-                    def balance(self, **kwargs):
-                        return [
-                            {
-                                "asset": "USDT",
-                                "balance": "10000.00",
-                                "availableBalance": "10000.00",
-                            },
-                            {
-                                "asset": "BTC",
-                                "balance": "1.00",
-                                "availableBalance": "1.00",
-                            },
-                        ]
+                # Call all registered callbacks for this symbol's ticker
+                if symbol in self.ticker_callbacks and self.ticker_callbacks[symbol]:
+                    self.ticker_callbacks[symbol](ticker_data)
 
-                    def change_leverage(self, **kwargs):
-                        return {"leverage": kwargs.get("leverage", 1)}
-
-                return MockClient(), MockClient()
-            else:
-                raise
+        except Exception as e:
+            self.logger.error(f"Error processing WebSocket message: {e}")
+            self.logger.debug(f"Problematic message: {message}")
 
     def fetch_historical_data(
         self, symbol: str, interval: str, lookback: int
@@ -581,7 +433,7 @@ class BinanceExchange:
                 )
             else:
                 # Legacy API
-                klines = self.client.get_historical_klines(
+                klines = self.spot_client.get_historical_klines(
                     symbol=symbol, interval=interval, limit=lookback
                 )
 
@@ -700,7 +552,7 @@ class BinanceExchange:
                         break
             else:
                 # Legacy API
-                symbol_info = self.client.get_symbol_info(symbol)
+                symbol_info = self.spot_client.get_symbol_info(symbol)
 
             if not symbol_info:
                 raise ValueError(f"Symbol information not found for {symbol}")
@@ -803,7 +655,7 @@ class BinanceExchange:
                 price_str = ticker["price"]
             else:
                 # Legacy API
-                ticker = self.client.get_ticker(symbol=symbol)
+                ticker = self.spot_client.get_ticker(symbol=symbol)
                 price_str = ticker["lastPrice"]
 
             return Decimal(price_str)
@@ -819,14 +671,19 @@ class BinanceExchange:
             else:
                 return Decimal("100")
 
-    def get_account_balance(self, asset: str) -> Optional[Decimal]:
+    def get_account_balance(
+        self, asset: str = None, force_refresh=False
+    ) -> Optional[Decimal]:
         """
-        Get account balance for an asset
+        Get account balance for an asset or total balance if no asset is specified.
+        Uses caching to avoid excessive API calls.
 
         Parameters
         ----------
-        asset : str
-            Asset symbol (e.g., 'USDT')
+        asset : str, optional
+            Asset symbol (e.g., 'USDT'). If None, returns total account balance.
+        force_refresh : bool, optional
+            Force a fresh balance check, bypassing the cache.
 
         Returns
         -------
@@ -834,30 +691,130 @@ class BinanceExchange:
             Available balance or None if balance retrieval fails
         """
         try:
+            # Apply time offset for Binance API requests
+            # This helps with the "Timestamp for this request is X ms ahead/behind" errors
+            try:
+                server_time = self.spot_client.get_server_time()
+                local_time = int(time.time() * 1000)
+                self.spot_client.timestamp_offset = (
+                    server_time["serverTime"] - local_time
+                )
+                self.logger.debug(
+                    f"Applied timestamp offset of {self.spot_client.timestamp_offset}ms to Binance client"
+                )
+            except Exception as ts_err:
+                self.logger.debug(f"Failed to set timestamp offset: {ts_err}")
+
+            # Check for cached balance
+            balance_cache_key = f"balance_{asset}" if asset else "balance_total"
+            current_time = time.time()
+
+            # Use cached value if available and not expired
+            if hasattr(self, "_balance_cache") and not force_refresh:
+                cache = getattr(self, "_balance_cache", {})
+                cache_time = getattr(self, "_balance_cache_time", {})
+
+                if balance_cache_key in cache and balance_cache_key in cache_time:
+                    # Use cache if it's less than 5 minutes old
+                    if current_time - cache_time[balance_cache_key] < 300:
+                        return cache[balance_cache_key]
+
+            # Initialize cache if it doesn't exist
+            if not hasattr(self, "_balance_cache"):
+                self._balance_cache = {}
+                self._balance_cache_time = {}
+
+            # If in demo mode, return the simulated balance
+            if self.demo_mode:
+                demo_balance = Decimal("20")  # Real account has 20 USDT
+
+                # Check if we have a saved demo balance
+                if hasattr(self, "_demo_balance"):
+                    demo_balance = self._demo_balance
+                else:
+                    self._demo_balance = demo_balance
+
+                # Cache the balance and update the timestamp
+                self._balance_cache[balance_cache_key] = demo_balance
+                self._balance_cache_time[balance_cache_key] = current_time
+
+                return demo_balance
+
+            # If no asset is specified, get total account balance
+            if asset is None:
+                if BINANCE_FUTURES_AVAILABLE:
+                    # Get balance from Futures API
+                    account_info = self.futures_client.account()
+                    total_balance = Decimal(account_info["totalWalletBalance"])
+
+                    # Cache the balance and update the timestamp
+                    self._balance_cache[balance_cache_key] = total_balance
+                    self._balance_cache_time[balance_cache_key] = current_time
+
+                    return total_balance
+                else:
+                    # For legacy API, return USDT balance
+                    return self.get_account_balance("USDT", force_refresh)
+
+            # Get specific asset balance
             if BINANCE_FUTURES_AVAILABLE:
                 # Get balance from Futures API
                 balances = self.futures_client.balance()
                 for balance in balances:
                     if balance["asset"] == asset:
-                        return Decimal(balance["availableBalance"])
+                        asset_balance = Decimal(balance["availableBalance"])
+
+                        # Cache the balance and update the timestamp
+                        self._balance_cache[balance_cache_key] = asset_balance
+                        self._balance_cache_time[balance_cache_key] = current_time
+
+                        return asset_balance
             else:
                 # Legacy API
-                account = self.client.get_account()
+                account = self.spot_client.get_account()
                 for balance in account["balances"]:
                     if balance["asset"] == asset:
-                        return Decimal(balance["free"])
+                        asset_balance = Decimal(balance["free"])
+
+                        # Cache the balance and update the timestamp
+                        self._balance_cache[balance_cache_key] = asset_balance
+                        self._balance_cache_time[balance_cache_key] = current_time
+
+                        return asset_balance
 
             self.logger.warning(f"Asset {asset} not found in account balances")
-            return Decimal("0")
+
+            # Set a reasonable default for the missing asset
+            default_balance = Decimal("0")
+            self._balance_cache[balance_cache_key] = default_balance
+            self._balance_cache_time[balance_cache_key] = current_time
+
+            return default_balance
+
         except Exception as e:
             self.logger.error(f"Error getting account balance: {e}")
-            # Return a fake balance for demo
-            if asset == "USDT":
-                return Decimal("10000")
+
+            # Check for time synchronization errors
+            if "Timestamp for this request" in str(e):
+                self.logger.warning(
+                    "Time synchronization error. Using cached balance if available."
+                )
+
+                # Use cached value if available
+                if (
+                    hasattr(self, "_balance_cache")
+                    and balance_cache_key in self._balance_cache
+                ):
+                    self.logger.info(f"Using cached balance due to time sync error")
+                    return self._balance_cache[balance_cache_key]
+
+            # Return a demo balance for errors
+            if asset is None or asset == "USDT":
+                return Decimal("20")  # Real account has 20 USDT
             elif asset == "BTC":
-                return Decimal("1")
+                return Decimal("0.0005")
             else:
-                return Decimal("100")
+                return Decimal("0.1")
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """
@@ -891,27 +848,295 @@ class BinanceExchange:
             self.logger.error(f"Error setting leverage: {e}")
             return False
 
-    def initialize_websocket(self, symbol, callback):
+    def initialize_websocket(self, symbol=None, callback=None, on_ticker_callback=None):
         """
-        Belirli bir sembol için WebSocket bağlantısı başlatır
+        Initialize and start the WebSocket connection for the configured symbol.
 
         Parameters
         ----------
-        symbol : str
-            İzlenecek sembol (örn. 'btcusdt')
-        callback : callable
-            WebSocket verisi alındığında çağrılacak fonksiyon
+        symbol : str, optional
+            Trading symbol (e.g., 'btcusdt'). Will use default if not provided.
+        callback : callable, optional
+            Main callback function for WebSocket messages
+        on_ticker_callback : callable, optional
+            Callback function for real-time price checks
+
+        Returns
+        -------
+        bool
+            True if successfully initialized, False otherwise
         """
-        self.ws_manager = BinanceWebSocketManager(
-            symbol=symbol, callback=callback, use_testnet=self.use_testnet
-        )
-        self.ws_manager.start()
-        return self.ws_manager
+        try:
+            if (
+                hasattr(self, "ws_manager")
+                and self.ws_manager
+                and self.ws_manager.is_connected
+            ):
+                self.logger.info("WebSocket connection already initialized")
+                return True
+
+            # Set the symbol if provided
+            if symbol:
+                self.symbol = symbol
+
+            if not hasattr(self, "symbol") or not self.symbol:
+                self.logger.error("Symbol not set for WebSocket connection")
+                return False
+
+            self.logger.info(f"Initializing WebSocket for {self.symbol}")
+            self.ws_manager = BinanceWebSocketManager(
+                symbol=self.symbol,
+                callback=callback or self._on_ws_message,
+                use_testnet=self.testnet,
+                auto_reconnect=True,
+            )
+
+            # Set the price check callback if provided
+            if on_ticker_callback:
+                if not hasattr(self, "ticker_callbacks"):
+                    self.ticker_callbacks = {}
+                self.ticker_callbacks[self.symbol] = on_ticker_callback
+
+            self.ws_manager.start()
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize WebSocket: {e}")
+            return False
 
     def close_websocket(self):
         """WebSocket bağlantısını kapatır"""
         if hasattr(self, "ws_manager"):
             self.ws_manager.stop()
+
+    def get_symbol_price(self, symbol: str) -> Optional[float]:
+        """
+        Get current price for a specific symbol
+
+        Parameters
+        ----------
+        symbol : str
+            Trading symbol (e.g., 'BTCUSDT')
+
+        Returns
+        -------
+        float
+            Current price or None if price retrieval fails
+        """
+        try:
+            if BINANCE_FUTURES_AVAILABLE:
+                # Get current price from Futures API
+                ticker = self.futures_client.ticker_price(symbol=symbol)
+                return float(ticker["price"])
+            else:
+                # Legacy API
+                ticker = self.spot_client.get_ticker(symbol=symbol)
+                return float(ticker["lastPrice"])
+        except Exception as e:
+            self.logger.error(f"Error getting {symbol} price: {e}")
+            # Return a reasonable default price for demo mode
+            if self.demo_mode:
+                if "BTC" in symbol:
+                    return 30000.0
+                elif "ETH" in symbol:
+                    return 2000.0
+                elif "DOGE" in symbol:
+                    return 0.15
+                else:
+                    return 100.0
+            return None
+
+    def create_market_order(
+        self, symbol: str, side: str, quantity: float
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Create a market order
+
+        Parameters
+        ----------
+        symbol : str
+            Trading symbol (e.g., 'BTCUSDT')
+        side : str
+            Order side ('BUY' or 'SELL')
+        quantity : float
+            Order quantity
+
+        Returns
+        -------
+        dict or None
+            Order response or None if order placement fails
+        """
+        try:
+            self.logger.info(f"Creating {side} market order for {quantity} {symbol}")
+
+            # Get symbol info for precision formatting
+            symbol_info = self.get_symbol_info(symbol)
+
+            # Format quantity with correct precision
+            formatted_quantity = format_quantity(
+                quantity, symbol_info.quantity_precision, symbol_info.step_size
+            )
+
+            self.logger.info(f"Formatted quantity: {formatted_quantity}")
+
+            # Place the order
+            if BINANCE_FUTURES_AVAILABLE:
+                # Using Futures API
+                params = {
+                    "symbol": symbol,
+                    "side": side,
+                    "type": "MARKET",
+                    "quantity": formatted_quantity,
+                }
+
+                if self.demo_mode:
+                    self.logger.info(
+                        f"DEMO MODE: Would place order with params: {params}"
+                    )
+                    # Generate a mock order response
+                    order_id = int(time.time() * 1000)
+                    mock_response = {
+                        "orderId": order_id,
+                        "symbol": symbol,
+                        "status": "FILLED",
+                        "clientOrderId": f"demo_{order_id}",
+                        "price": str(self.get_symbol_price(symbol)),
+                        "avgPrice": str(self.get_symbol_price(symbol)),
+                        "origQty": formatted_quantity,
+                        "executedQty": formatted_quantity,
+                        "cumQty": formatted_quantity,
+                        "timeInForce": "GTC",
+                        "type": "MARKET",
+                        "side": side,
+                    }
+                    self.logger.info(f"DEMO MODE: Mock order response: {mock_response}")
+                    return mock_response
+                else:
+                    response = self.futures_client.new_order(**params)
+                    self.logger.info(f"Order placed successfully: {response}")
+                    return response
+            else:
+                # Using legacy API
+                if self.demo_mode:
+                    self.logger.info(
+                        f"DEMO MODE: Would place {side} market order for {formatted_quantity} {symbol}"
+                    )
+                    # Generate a mock order response
+                    order_id = int(time.time() * 1000)
+                    mock_response = {
+                        "orderId": order_id,
+                        "symbol": symbol,
+                        "status": "FILLED",
+                        "clientOrderId": f"demo_{order_id}",
+                        "price": "0.00",
+                        "origQty": formatted_quantity,
+                        "executedQty": formatted_quantity,
+                        "timeInForce": "GTC",
+                        "type": "MARKET",
+                        "side": side,
+                    }
+                    self.logger.info(f"DEMO MODE: Mock order response: {mock_response}")
+                    return mock_response
+                else:
+                    response = self.spot_client.create_order(
+                        symbol=symbol,
+                        side=side,
+                        type="MARKET",
+                        quantity=formatted_quantity,
+                    )
+                    self.logger.info(f"Order placed successfully: {response}")
+                    return response
+
+        except Exception as e:
+            self.logger.error(f"Error creating market order: {e}")
+            if self.demo_mode:
+                # Return a mock successful order response for demo mode
+                order_id = int(time.time() * 1000)
+                mock_response = {
+                    "orderId": order_id,
+                    "symbol": symbol,
+                    "status": "FILLED",
+                    "clientOrderId": f"demo_error_{order_id}",
+                }
+                self.logger.info(
+                    f"DEMO MODE: Returning mock order response despite error: {mock_response}"
+                )
+                return mock_response
+            return None
+
+    def get_min_order_quantity(self, symbol: str) -> Decimal:
+        """
+        Get minimum order quantity for a symbol
+
+        Parameters
+        ----------
+        symbol : str
+            Trading symbol (e.g., 'BTCUSDT')
+
+        Returns
+        -------
+        Decimal
+            Minimum order quantity
+        """
+        try:
+            symbol_info = self.get_symbol_info(symbol)
+            return symbol_info.min_qty
+        except Exception as e:
+            self.logger.error(f"Error getting minimum order quantity: {e}")
+            return Decimal("0.001")  # Default fallback value
+
+    def format_quantity(
+        self, quantity: Union[Decimal, float], precision: int, step_size: Decimal = None
+    ) -> str:
+        """
+        Format quantity with the correct number of decimal places and step size
+
+        Parameters
+        ----------
+        quantity : Union[Decimal, float]
+            Quantity to format
+        precision : int
+            Number of decimal places
+        step_size : Decimal, optional
+            Step size from exchange rules for rounding
+
+        Returns
+        -------
+        str
+            Formatted quantity string
+        """
+        # First round to step size if provided
+        if step_size is not None:
+            quantity = round_step_size(quantity, step_size)
+
+        # Then format to correct precision
+        return format_quantity(quantity, precision)
+
+    def get_account_balance(self, force_refresh=False):
+        """Get current account balance in USDT"""
+        try:
+            # Apply time offset for Binance API request
+            self.spot_client.timestamp_offset = (
+                int(time.time() * 1000)
+                - self.spot_client.get_server_time()["serverTime"]
+            )
+
+            # Get account info
+            account_info = self.spot_client.get_account()
+
+            # Find USDT balance
+            usdt_balance = 0
+            for asset in account_info["balances"]:
+                if asset["asset"] == "USDT":
+                    usdt_balance = float(asset["free"]) + float(asset["locked"])
+                    break
+
+            return usdt_balance
+        except Exception as e:
+            logging.getLogger("turtle_trading_bot").error(
+                f"Error getting account balance: {e}"
+            )
+            # Return default balance on error
+            return 20.0
 
 
 class ExchangeInterface:
@@ -932,7 +1157,7 @@ class ExchangeInterface:
             use_testnet: Whether to use the Binance testnet
         """
         self.logger = logging.getLogger("turtle_trading_bot")
-        self.exchange = BinanceExchange(api_key, api_secret, use_testnet)
+        self.exchange = BinanceExchange(api_key, api_secret, testnet=use_testnet)
         self.symbol_cache = {}
 
     def get_historical_data(self, symbol, timeframe, limit=100):
@@ -949,7 +1174,7 @@ class ExchangeInterface:
         """
         try:
             # Convert Binance klines to DataFrame
-            klines = self.exchange.client.get_klines(
+            klines = self.exchange.spot_client.get_klines(
                 symbol=symbol, interval=timeframe, limit=limit
             )
 
@@ -1048,7 +1273,7 @@ class ExchangeInterface:
             dict: Account information
         """
         try:
-            return self.exchange.client.get_account()
+            return self.exchange.spot_client.get_account()
         except Exception as e:
             self.logger.error(f"Error getting account info: {e}")
             raise

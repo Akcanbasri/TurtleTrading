@@ -7,7 +7,8 @@ from decimal import Decimal
 from typing import Tuple, Union, Dict, Any
 import pandas as pd
 
-from bot.utils import round_step_size
+from bot.utils import round_step_size, format_quantity
+from bot.models import SymbolInfo
 
 
 def adjust_risk_based_on_volatility(
@@ -73,244 +74,133 @@ def adjust_risk_based_on_volatility(
 
 
 def calculate_position_size(
-    available_balance: Decimal,
-    risk_percent: Decimal,
-    atr_value: Union[float, Decimal],
-    current_price: Decimal,
-    symbol_info: dict,
-    max_risk_percentage: Decimal = Decimal("0.1"),
+    balance: float,
+    risk_pct: float,
+    atr_value: float,
+    current_price: float,
+    symbol_info: SymbolInfo,
     leverage: int = 1,
-    position_side: str = "BUY",
-    pyramid_level: int = 0,
-    pyramid_size_first: Decimal = Decimal("0.4"),
-    pyramid_size_additional: Decimal = Decimal("0.3"),
-    is_trend_aligned: bool = True,
-    atr_average: Union[float, Decimal] = None,
-) -> Tuple[Decimal, str]:
+    existing_position_count: int = 0,
+    price_precision: int = 2,
+    max_positions: int = 4,
+) -> Tuple[float, float, float]:
     """
-    Calculate position size based on risk management rules and exchange limitations
+    Calculate position size based on risk percentage and ATR value
 
     Parameters
     ----------
-    available_balance : Decimal
-        Available balance in quote asset
-    risk_percent : Decimal
-        Risk percentage per trade (e.g., 0.02 for 2%)
-    atr_value : Union[float, Decimal]
-        Current ATR value
-    current_price : Decimal
-        Current market price
-    symbol_info : dict
-        Trading rules for the symbol
-    max_risk_percentage : Decimal
-        Maximum risk percentage of all open positions
-    leverage : int
-        Leverage to use (1 = no leverage)
-    position_side : str
-        Position side ('BUY' or 'SELL')
-    pyramid_level : int
-        Current pyramid level (0 = first entry)
-    pyramid_size_first : Decimal
-        Portion of planned size for first entry (e.g., 0.4 = 40%)
-    pyramid_size_additional : Decimal
-        Portion of planned size for additional entries
-    is_trend_aligned : bool
-        Whether the trade is aligned with the main trend
-    atr_average : Union[float, Decimal], optional
-        Average ATR value over a longer period for volatility-based risk adjustment
+    balance : float
+        Available balance
+    risk_pct : float
+        Risk percentage (0-100)
+    atr_value : float
+        ATR value for volatility calculation
+    current_price : float
+        Current price of the asset
+    symbol_info : SymbolInfo
+        Symbol information including min notional and quantity
+    leverage : int, optional
+        Leverage multiplier, by default 1
+    existing_position_count : int, optional
+        Number of existing positions, by default 0
+    price_precision : int, optional
+        Price precision, by default 2
+    max_positions : int, optional
+        Maximum number of positions to open, by default 4
 
     Returns
     -------
-    Tuple[Decimal, str]
-        Calculated position size and status message
+    Tuple[float, float, float]
+        (position_size, risk_per_unit, stop_loss_distance)
     """
     logger = logging.getLogger("turtle_trading_bot")
 
-    # Extract symbol info parameters
-    min_qty = symbol_info["min_qty"]
-    step_size = symbol_info["step_size"]
-    min_notional = symbol_info["min_notional"]
-    quantity_precision = symbol_info["quantity_precision"]
+    # Convert percentage to decimal
+    risk_pct_decimal = risk_pct / 100.0
 
-    try:
-        # Convert inputs to Decimal for precision calculations
-        atr_value_dec = (
-            Decimal(str(atr_value)) if not isinstance(atr_value, Decimal) else atr_value
+    # Get risk amount based on balance
+    risk_amount = balance * risk_pct_decimal
+
+    # Calculate max risk per position based on pyramid strategy
+    if max_positions > 0:
+        # Adjust risk based on existing positions
+        position_risk_factor = 1.0 - (existing_position_count / max_positions)
+        position_risk_amount = risk_amount * position_risk_factor
+    else:
+        position_risk_amount = risk_amount
+
+    logger.info(
+        f"Risk calculation: Balance=${balance:.2f}, Risk %={risk_pct}%, "
+        f"Risk Amount=${risk_amount:.2f}, Position Risk=${position_risk_amount:.2f}, "
+        f"Existing Positions={existing_position_count}/{max_positions}, Leverage={leverage}x"
+    )
+
+    # Calculate stop loss distance in price units
+    stop_loss_distance = atr_value * 2
+
+    # Calculate max position size based on risk
+    if stop_loss_distance > 0:
+        # Calculate risk per unit of price movement
+        risk_per_unit = position_risk_amount / stop_loss_distance
+
+        # Calculate position size from risk per unit
+        position_size = risk_per_unit
+
+        # Adjust for leverage if applicable
+        if leverage > 1:
+            position_size *= leverage
+            logger.debug(
+                f"Position size adjusted for {leverage}x leverage: {position_size:.8f}"
+            )
+    else:
+        logger.warning(
+            "Stop loss distance is zero or negative, using minimum position size"
         )
+        position_size = float(symbol_info.min_qty)
+        risk_per_unit = 0.0
 
-        # Apply volatility-based risk adjustment if average ATR is provided
-        adjusted_risk_percent = risk_percent
-        if atr_average is not None:
-            atr_average_dec = (
-                Decimal(str(atr_average))
-                if not isinstance(atr_average, Decimal)
-                else atr_average
-            )
-            adjusted_risk_percent = adjust_risk_based_on_volatility(
-                risk_percent,
-                atr_value_dec,
-                atr_average_dec,
-                Decimal(str(max_risk_percentage)),
-            )
-        else:
-            adjusted_risk_percent = risk_percent
+    # Convert to quote currency value
+    position_value = position_size * current_price
 
-        # 1. Calculate the amount willing to risk per trade
-        risk_amount = available_balance * adjusted_risk_percent
-        logger.info(
-            f"Risk amount: {risk_amount} ({adjusted_risk_percent*100}% of {available_balance})"
+    # Check if position size meets minimum notional value
+    min_notional = float(symbol_info.min_notional)
+    if position_value < min_notional:
+        logger.warning(
+            f"Position value (${position_value:.2f}) below min notional (${min_notional}), "
+            f"adjusting position size"
         )
+        # Adjust position size to meet minimum notional
+        position_size = min_notional / current_price
 
-        # 2. Adjust leverage based on trend alignment
-        effective_leverage = Decimal(str(leverage))
-        if not is_trend_aligned:
-            effective_leverage = Decimal("1.0")  # No leverage for counter-trend trades
-            logger.info("Counter-trend trade detected, reducing leverage to 1x")
+    # Check if position size meets minimum quantity
+    min_qty = float(symbol_info.min_qty)
+    if position_size < min_qty:
+        logger.warning(
+            f"Position size ({position_size:.8f}) below min qty ({min_qty}), "
+            f"adjusting to minimum quantity"
+        )
+        position_size = min_qty
 
-        logger.info(f"Using effective leverage: {effective_leverage}x")
+    # Ensure position size respects the step size
+    step_size = symbol_info.step_size
+    if step_size:
+        original_position_size = position_size
+        position_size = round_step_size(position_size, step_size)
 
-        # 3. Calculate stop loss distance in quote asset terms
-        stop_distance = atr_value_dec
-        stop_distance_quote = stop_distance
-
-        # 4. Adjust for leverage - risk stays the same but position size increases
-        risk_with_leverage = risk_amount * effective_leverage
-
-        logger.info(f"Stop distance: {stop_distance} (ATR {atr_value_dec})")
-        logger.info(f"Leveraged risk amount: {risk_with_leverage}")
-
-        # 5. Calculate base position size based on risk amount and stop distance
-        if stop_distance_quote == Decimal("0"):
-            return (
-                Decimal("0"),
-                "Stop distance is zero. Cannot calculate position size.",
+        if position_size != original_position_size:
+            logger.debug(
+                f"Position size adjusted from {original_position_size:.8f} to {position_size:.8f} "
+                f"to respect step size {step_size}"
             )
 
-        base_position_size = risk_with_leverage / stop_distance_quote
-        logger.info(f"Base position size calculation: {base_position_size}")
+    # Final position size logging
+    logger.info(
+        f"Position size: {position_size:.8f} ({format_quantity(position_size, symbol_info.quantity_precision, symbol_info.step_size)}), "
+        f"Value: ${position_size * current_price:.2f}, "
+        f"Stop loss distance: {stop_loss_distance:.{price_precision}f}"
+    )
 
-        # 6. Apply position sizing based on pyramid level
-        if pyramid_level == 0:
-            # First entry - use the specified percentage
-            position_size = base_position_size * pyramid_size_first
-            logger.info(f"First pyramid entry: using {pyramid_size_first*100}% of size")
-        else:
-            # Subsequent entries - use the additional percentage
-            position_size = base_position_size * pyramid_size_additional
-            logger.info(
-                f"Pyramid level {pyramid_level+1}: using {pyramid_size_additional*100}% of size"
-            )
-
-        logger.info(f"Position size after pyramid adjustment: {position_size}")
-
-        # 7. Adjust for step size restrictions
-        adjusted_position_size = Decimal(str(round_step_size(position_size, step_size)))
-        logger.info(f"Position size adjusted for step size: {adjusted_position_size}")
-
-        # 8. Check against minimum quantity requirement
-        if adjusted_position_size < min_qty:
-            logger.warning(
-                f"Calculated position size {adjusted_position_size} is below minimum quantity {min_qty}"
-            )
-
-            # Try to use minimum quantity instead
-            adjusted_position_size = min_qty
-            logger.info(f"Adjusted to minimum quantity: {adjusted_position_size}")
-
-        # 9. Check against minimum notional value
-        notional_value = adjusted_position_size * current_price
-
-        if notional_value < min_notional:
-            logger.warning(
-                f"Notional value {notional_value} is below minimum {min_notional}"
-            )
-
-            # Try to adjust position size to meet minimum notional
-            required_position_size = min_notional / current_price
-            # Round up to next step size
-            adjusted_position_size = Decimal(
-                round_step_size(required_position_size, step_size)
-            )
-
-            # Re-check step size compliance
-            if adjusted_position_size % step_size != Decimal("0"):
-                # Ensure it's a multiple of step_size by rounding up
-                steps = (adjusted_position_size / step_size).quantize(
-                    Decimal("1"), rounding="ROUND_UP"
-                )
-                adjusted_position_size = steps * step_size
-
-            logger.info(
-                f"Position size adjusted for min notional: {adjusted_position_size}"
-            )
-            notional_value = adjusted_position_size * current_price
-            logger.info(f"New notional value: {notional_value}")
-
-        # 10. Check if there's enough balance for the position
-        margin_required = (adjusted_position_size * current_price) / effective_leverage
-
-        if margin_required > available_balance:
-            logger.warning(
-                f"Required margin {margin_required} exceeds available balance {available_balance}"
-            )
-
-            # Try to adjust position size to available balance
-            max_affordable_size = (
-                available_balance * Decimal("0.99") * effective_leverage
-            ) / current_price  # 99% of balance for fees
-            adjusted_position_size = Decimal(
-                round_step_size(max_affordable_size, step_size)
-            )
-
-            # Final check against minimum requirements
-            if adjusted_position_size < min_qty:
-                return (
-                    Decimal("0"),
-                    f"Cannot meet minimum quantity requirement ({min_qty}) with available balance",
-                )
-
-            notional_value = adjusted_position_size * current_price
-            if notional_value < min_notional:
-                return (
-                    Decimal("0"),
-                    f"Cannot meet minimum notional requirement ({min_notional}) with available balance",
-                )
-
-            logger.info(
-                f"Position size adjusted for available balance: {adjusted_position_size}"
-            )
-
-        # 11. Final check for all requirements
-        if (
-            adjusted_position_size >= min_qty
-            and adjusted_position_size * current_price >= min_notional
-            and (adjusted_position_size * current_price) / effective_leverage
-            <= available_balance
-        ):
-            # Format to correct precision
-            from bot.utils import format_quantity
-
-            formatted_size = format_quantity(adjusted_position_size, quantity_precision)
-            final_size = Decimal(formatted_size)
-
-            logger.info(f"Final position size: {final_size}")
-            logger.info(f"Estimated cost: {final_size * current_price}")
-            logger.info(
-                f"Margin required: {(final_size * current_price) / effective_leverage}"
-            )
-            logger.info(f"Risk per trade: {risk_amount} ({adjusted_risk_percent*100}%)")
-            logger.info(f"Leverage used: {effective_leverage}x")
-
-            return final_size, "success"
-        else:
-            return (
-                Decimal("0"),
-                "Failed to calculate valid position size meeting all requirements",
-            )
-
-    except Exception as e:
-        logger.error(f"Error calculating position size: {e}")
-        return Decimal("0"), f"Error calculating position size: {str(e)}"
+    return position_size, risk_per_unit, stop_loss_distance
 
 
 def calculate_pnl(
@@ -715,3 +605,144 @@ def optimize_position_sizes_for_portfolio(
         )
 
     return adjusted_positions
+
+
+def adjust_leverage_by_signal_strength(
+    signal_strength: float,
+    market_regime: str,
+    is_weekend: bool = False,
+    base_leverage: int = 3,
+    max_leverage: int = 5,
+    position_side: str = "BUY",
+) -> int:
+    """
+    Adjust leverage based on signal strength, market regime and time of week
+
+    Parameters
+    ----------
+    signal_strength : float
+        Strength of the signal from 0.0-1.0
+    market_regime : str
+        Current market regime (trending, ranging, squeeze, etc.)
+    is_weekend : bool
+        Whether it's weekend trading (typically higher volatility in crypto)
+    base_leverage : int
+        Base leverage level to start with
+    max_leverage : int
+        Maximum allowed leverage
+    position_side : str
+        Position side ('BUY' or 'SELL')
+
+    Returns
+    -------
+    int
+        Recommended leverage level (1-5)
+    """
+    logger = logging.getLogger("turtle_trading_bot")
+
+    # Adjust base leverage based on signal strength
+    if signal_strength >= 0.8:
+        adjusted_leverage = max(base_leverage + 2, max_leverage)
+    elif signal_strength >= 0.6:
+        adjusted_leverage = base_leverage + 1
+    elif signal_strength >= 0.4:
+        adjusted_leverage = base_leverage
+    elif signal_strength >= 0.2:
+        adjusted_leverage = base_leverage - 1
+    else:
+        adjusted_leverage = 1  # Minimum leverage for weak signals
+
+    # Market regime adjustments
+    if market_regime == "trending_up" and position_side == "BUY":
+        adjusted_leverage += 1  # Increase leverage for aligned trend
+    elif market_regime == "trending_down" and position_side == "SELL":
+        adjusted_leverage += 1  # Increase leverage for aligned trend
+    elif market_regime == "ranging":
+        adjusted_leverage -= 1  # Reduce leverage in ranging markets
+    elif market_regime == "squeeze":
+        # Keep normal leverage for squeeze breakouts
+        pass
+    elif market_regime == "volatile":
+        adjusted_leverage -= 1  # Reduce leverage in volatile markets
+
+    # Weekend adjustment for crypto markets
+    if is_weekend:
+        weekend_reduction = 2  # More reduction for weekends
+        adjusted_leverage = max(1, adjusted_leverage - weekend_reduction)
+        logger.info(
+            f"Weekend trading detected - reducing leverage by {weekend_reduction}"
+        )
+
+    # Ensure leverage is in valid range
+    adjusted_leverage = max(1, min(adjusted_leverage, max_leverage))
+
+    # Reduce leverage for short positions (more risky)
+    if position_side == "SELL":
+        adjusted_leverage = max(1, adjusted_leverage - 1)
+
+    logger.info(
+        f"Adjusted leverage: {adjusted_leverage}x (Signal strength: {signal_strength:.2f}, Regime: {market_regime})"
+    )
+
+    return adjusted_leverage
+
+
+def calculate_partial_take_profit_levels(
+    entry_price: float,
+    atr_value: float,
+    position_side: str,
+    levels: list = [2.0, 3.0],  # Default to 2x and 3x ATR
+) -> list:
+    """
+    Calculate partial take profit levels based on ATR
+
+    Parameters
+    ----------
+    entry_price : float
+        Position entry price
+    atr_value : float
+        ATR value at entry
+    position_side : str
+        Position side ('BUY' or 'SELL')
+    levels : list
+        List of ATR multiples for take profit levels
+
+    Returns
+    -------
+    list
+        List of take profit price levels
+    """
+    tp_levels = []
+
+    for level_multiple in levels:
+        target_distance = atr_value * level_multiple
+
+        if position_side == "BUY":
+            # Long position - take profit is above entry
+            tp_price = entry_price + target_distance
+        else:
+            # Short position - take profit is below entry
+            tp_price = entry_price - target_distance
+
+        tp_levels.append((tp_price, level_multiple))
+
+    return tp_levels
+
+
+def is_weekend() -> bool:
+    """
+    Check if current time is weekend (Saturday or Sunday)
+    Returns true if it's Saturday or Sunday
+
+    Returns
+    -------
+    bool
+        True if current day is weekend, False otherwise
+    """
+    import datetime
+
+    # Get current day of week (0 = Monday, 6 = Sunday)
+    current_day = datetime.datetime.now().weekday()
+
+    # 5 = Saturday, 6 = Sunday
+    return current_day >= 5
